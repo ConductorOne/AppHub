@@ -29,7 +29,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/gofrs/flock v0.13.1
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/oapi-codegen/runtime v1.7.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.48.0
