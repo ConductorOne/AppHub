@@ -1,0 +1,10 @@
+# An anchor and an alias: textually the offending value appears once, in a
+# block that is not itself a permissions map.
+name: anchored
+on: [push]
+x-defaults: &oidc
+  id-token: write
+jobs:
+  aliased:
+    runs-on: ubuntu-latest
+    permissions: *oidc

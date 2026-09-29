@@ -1,0 +1,6 @@
+displayName: AppHub SSO Cookie Strip
+type: middleware
+import: github.com/conductorone/apphub/terraform/plugins/cookiestrip
+summary: Remove shared oauth2-proxy cookies before proxying to an application.
+testData:
+  enabled: true

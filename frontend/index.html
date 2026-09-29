@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF" /><meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1A1918" /><link rel="icon" type="image/jpeg" href="/favicon.jpg" /><link rel="apple-touch-icon" href="/apple-touch-icon.png" /><title>AppHub</title><script>
+(function () {
+  try {
+    var mode = localStorage.getItem('apphub-mode') || 'system';
+    var system = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-mui-color-scheme', mode === 'system' ? system : mode);
+  } catch (e) {}
+})();
+</script></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>

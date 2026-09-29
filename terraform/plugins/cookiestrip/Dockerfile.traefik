@@ -1,0 +1,16 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build from the AppHub repository root:
+#   docker build -f terraform/plugins/cookiestrip/Dockerfile.traefik -t REGISTRY/apphub-traefik:VERSION .
+#   docker push REGISTRY/apphub-traefik:VERSION
+# Supply the resulting immutable REGISTRY/apphub-traefik@sha256:DIGEST as
+# terraform ingress.traefik_image. Build/publish before the first apply.
+# This local plugin is packaged with Traefik; ingress never downloads Go code
+# from a third party at startup. Update the base digest deliberately with a
+# reviewed Traefik release (not a mutable tag).
+FROM traefik:v3.6@sha256:31267173a15b4944e797a76ffd9c419707c8d8b32fe5b610f80cd0cfa05f372d
+
+WORKDIR /
+
+COPY terraform/plugins/cookiestrip/go.mod terraform/plugins/cookiestrip/cookiestrip.go terraform/plugins/cookiestrip/.traefik.yml /plugins-local/src/github.com/conductorone/apphub/terraform/plugins/cookiestrip/

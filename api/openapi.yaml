@@ -1,0 +1,3951 @@
+openapi: 3.1.0
+info:
+  title: AppHub control plane
+  version: 1.0.0
+  description: |
+    Organization application and durable deployment API. This document is the wire
+    contract for browser, CLI, SDK, and MCP adapter inputs and results. All API
+    paths are relative to the operator-configured public origin. Production uses
+    HTTPS; HTTP is allowed only on an explicitly configured literal loopback
+    development origin. Origins and OAuth resources are never inferred from Host
+    or forwarded headers.
+
+    Users authenticate through an admitted Google or OIDC identity. Exact issuer
+    and subject identify an account; equal email addresses never merge accounts.
+    Eligibility, local disablement, admission, and operator-configured admin role
+    are checked on each request. Ordinary users can access only their own
+    applications and deployments. Admins can operate any application. Inaccessible
+    object IDs return 404, before revealing scope failures on another owner's
+    objects. Known accessible objects with insufficient scope return 403.
+
+    API requests support a browser session OR an opaque AppHub OAuth bearer token
+    for the exact resource {publicOrigin}/api. POST /api/v1/github/webhook is the
+    exception: GitHub authenticates with X-Hub-Signature-256, and a session or
+    bearer token is not a credential there. If Authorization is present, bearer
+    authentication is selected exclusively; an invalid bearer never falls back to
+    cookies. Upstream ID tokens and tokens for {publicOrigin}/mcp are not API
+    credentials. Browser mutations require both exact Origin and session-bound
+    X-CSRF-Token. Missing Origin is not accepted for cookie mutations. These
+    requirements are conditional on cookie authentication, not on bearer requests.
+    Sessions expire after 24 hours. Local policy changes are immediate; upstream
+    deprovisioning is not claimed to be immediate without an upstream signal.
+
+    JSON request bodies are capped at 128 KiB; persisted application specifications
+    at 64 KiB. Unknown request fields are rejected rather than ignored. Validation
+    does not cause cloud side effects. Failure messages are service-authored safe
+    text; raw provider errors, credentials, build logs, and stack traces are never
+    returned. Dependency failures return 503, never a fabricated empty inventory.
+
+    Create and submit use separate, required Idempotency-Key values. A key is
+    scoped to principal and operation; the same key and canonical request return
+    the original IDs, while different content returns 409 idempotency_conflict.
+    Retention is at least the lifetime of the corresponding resource. Preserve
+    keys across uncertain network outcomes. A 202 means durable acceptance, not
+    deployment readiness. The worker runs independently of HTTP disconnection.
+
+    Remote MCP uses the official stateless Streamable HTTP transport at /mcp and
+    the separate resource {publicOrigin}/mcp. It accepts bearer only, checks Origin
+    when present, and uses these same service DTOs, scope rules, and idempotency
+    semantics. Its protocol envelope is defined by MCP, not a second REST schema.
+servers:
+  - url: /
+tags:
+  - name: Authentication
+  - name: Targets
+  - name: Detections
+  - name: Workspace
+  - name: Applications
+  - name: Deployments
+  - name: Sessions
+  - name: OAuth
+security:
+  - SessionCookie: []
+  - OAuth: []
+paths:
+  /api/v1/auth/providers:
+    get:
+      operationId: listAuthProviders
+      tags: [Authentication]
+      summary: List configured sign-in choices
+      security: []
+      responses:
+        '200':
+          description: Safe provider descriptions; no admission rules or client secrets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvidersResponse'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/{providerId}/login:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      operationId: beginLogin
+      tags: [Authentication]
+      summary: Start browser Google or OIDC login
+      security: []
+      description: |
+        Redirects to the selected provider with state, nonce, and S256 PKCE. A
+        five-minute single-use transaction binds provider, issuer, client,
+        callback, browser, and return target. A separate host-only HttpOnly
+        SameSite=Lax Secure login cookie per transaction allows concurrent tabs
+        and providers. Cookie names use __Host-apphub_login_<state-hash-prefix>;
+        only explicit loopback HTTP omits __Host-. Nonce and verifier are encrypted
+        server-side and never returned to application clients.
+      parameters:
+        - name: return_to
+          in: query
+          description: |
+            Local path to visit after login; fallback is /applications. URL parsing
+            rejects schemes, authorities, backslashes, controls, protocol-relative
+            paths, and encoded equivalents. It is not an arbitrary redirect URL.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the configured identity provider.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              description: Unique browser-binding transaction cookie; never a provider token.
+              schema:
+                type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/{providerId}/callback:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      operationId: completeLogin
+      tags: [Authentication]
+      summary: Consume a browser-bound upstream login response
+      security: []
+      description: |
+        Requires the matching transaction cookie and provider binding. State and
+        transaction expiry are checked and the transaction is atomically consumed
+        before code exchange. Provider signature, issuer, audience, expiry, nonce,
+        nonempty subject, UserInfo subject, and verified-email admission are
+        verified. The transaction cookie is cleared on every outcome. Successful
+        login establishes a fresh 24-hour session and redirects only to the bound
+        safe local return path. Upstream tokens are discarded. Replayed, expired,
+        mismatched, or invalid transactions never create a session.
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: code
+          in: query
+          description: Required for a successful upstream response; mutually exclusive with error.
+          schema:
+            type: string
+        - name: error
+          in: query
+          description: Upstream denial/error; never rendered without safe classification.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the bound return path after establishing a session.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Set-Cookie:
+              description: Host-only session cookie; Secure, HttpOnly, SameSite=Lax, Path=/, no Domain.
+              schema:
+                type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/logout:
+    post:
+      operationId: logoutBrowser
+      tags: [Authentication]
+      summary: Revoke the current browser session
+      security:
+        - SessionCookie: []
+      description: |
+        Revokes only the current browser session, not OAuth families or other
+        browsers. Clears the cookie only after durable revocation succeeds.
+        Failure remains retryable; a storage failure must not look like logout.
+      parameters:
+        - $ref: '#/components/parameters/RequiredOrigin'
+        - $ref: '#/components/parameters/RequiredCSRF'
+      responses:
+        '204':
+          description: Session revoked and cookie cleared.
+          headers:
+            Set-Cookie:
+              description: Expired session cookie with the original path and security attributes.
+              schema:
+                type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/users/me:
+    get:
+      operationId: getCurrentUser
+      tags: [Authentication]
+      summary: Read the effective current identity and permissions
+      description: |
+        Any valid nonempty granted OAuth scope suffices. Cookie callers receive
+        their session-bound CSRF token; bearer callers do not. Role is
+        derived from exact operator-configured providerId and subject
+        (auth.admins, always admin) or, where a directory is configured, from
+        an admin-mapped directory entitlement the identity currently holds --
+        never email domain either way.
+      responses:
+        '200':
+          description: Current eligible profile, role, identity, and actions.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/targets:
+    get:
+      operationId: listTargets
+      tags: [Targets]
+      summary: List safe operator-managed deployment options
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        No account, IAM, certificate, resource prefix, network, AWS configuration,
+        or source credential fields are exposed. ready requires a worker descriptor
+        no older than 60 seconds whose configuration hash matches API policy.
+        Unsupported data kinds and execution modes must not be offered by clients.
+      responses:
+        '200':
+          description: Enabled targets and policy-constrained supported options.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TargetView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/categories:
+    get:
+      operationId: listCategories
+      tags: [Applications]
+      summary: List the categories an application may be assigned
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Fixed server-defined set used to group applications in the portal.
+      responses:
+        '200':
+          description: Every assignable category, in display order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CategoryView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/targets/{id}/detect:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: detectRepository
+      tags: [Detections]
+      summary: Durably queue an advisory Dockerfile/database scan of an approved repository
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Application owners and workspace administrators may request a scan;
+        members cannot queue repository reads even with applications:write.
+        For the "simple deploy" flow: given a target and a repository URL that
+        the target's operator list or GitHub App installation allows, best-effort
+        discover a Dockerfile, its EXPOSE port, any docker-compose services, and
+        a managed database guess ahead of creating or editing an application.
+        The scan runs in the isolated worker, never in this authenticated API
+        process, which holds no source credentials; this endpoint only durably
+        queues the request and returns where to poll for the result. Everything
+        returned is advisory: a caller must fall back to its own defaults
+        rather than treating an empty or failed result as fatal.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectionInput'
+      responses:
+        '202':
+          description: Durable scan accepted; poll statusUrl.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/detections/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getDetection
+      tags: [Detections]
+      summary: Poll an advisory repository scan
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Visible only to the requester who queued it, or an administrator; a foreign ID reports 404, not 403.
+      responses:
+        '200':
+          description: Current scan state; result is present only once state is succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/github-app:
+    get:
+      operationId: getGitHubAppStatus
+      tags: [Workspace]
+      summary: Read the admin-managed GitHub App's safe status
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Administrator only. Never returns the private key. available is false
+        when this deployment has not configured GitHubAppAdmin at all, in
+        which case every other field is zero and the Workspace should show
+        setup instructions rather than a form.
+      responses:
+        '200':
+          description: Current status, including synced installations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubAppStatusView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    put:
+      operationId: setGitHubAppConfig
+      tags: [Workspace]
+      summary: Replace the admin-managed GitHub App's identity and private key
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Administrator only. Full replacement, not a patch. privateKey is
+        three-valued: the exact string "MASKED:****" keeps the currently
+        stored key unchanged (send it back after reading a status response,
+        which never contains the real key), an empty string clears the
+        stored key, and any other value replaces it after being validated as
+        parseable RS256 key material for the given appId. A replacement key
+        is written to durable storage before this deployment's record is
+        updated; it is never returned in any response.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GitHubAppConfigInput'
+      responses:
+        '200':
+          description: Updated status, including synced installations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubAppStatusView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/github-app/manifest:
+    post:
+      operationId: startGitHubAppManifest
+      tags: [Workspace]
+      summary: Begin creating the admin-managed GitHub App via GitHub's App Manifest flow
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Administrator only. Durably records a short-lived, single-use state
+        token bound to this administrator and returns the manifest JSON and
+        target URL a browser must submit as a form POST to GitHub. GitHub
+        creates the App after the administrator reviews and confirms it
+        there, then redirects the browser to
+        /api/v1/admin/github-app/manifest/callback with a one-time code and
+        this same state. This flow only ever creates the App against
+        github.com; a GitHub Enterprise Server operator continues to use PUT
+        /api/v1/admin/github-app.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GitHubAppManifestInput'
+      responses:
+        '200':
+          description: The manifest and target URL to submit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubAppManifestStart'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/github-app/manifest/callback:
+    get:
+      operationId: completeGitHubAppManifest
+      tags: [Workspace]
+      summary: Consume GitHub's redirect back from the App Manifest flow
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        A browser lands here only via GitHub's own redirect after
+        startGitHubAppManifest, never called directly. state must name a
+        still-valid, not-yet-consumed token the same administrator's own
+        earlier call created -- consumed before anything else, so a replayed
+        or shared callback URL can never re-exchange the same GitHub-issued
+        code twice. Always redirects into the Workspace, success or failure,
+        never a JSON body a browser navigation would just display raw.
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect into the Workspace's GitHub App tab, reporting success or a safe error reason.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+  /api/v1/github/webhook:
+    post:
+      operationId: receiveGitHubWebhook
+      tags: [Workspace]
+      summary: Receive a GitHub App webhook
+      security: []
+      description: |
+        GitHub delivers App webhooks here. Authentication is the
+        X-Hub-Signature-256 HMAC of the raw body, using the webhook secret
+        injected from Parameter Store into the API container. A browser
+        session or an API token is not a credential for this route. A
+        missing secret, a missing signature, or a signature that does not
+        match is rejected with an empty 401. A verified delivery is
+        acknowledged with 204 and is not applied to installation records.
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: The signature matched. The delivery is acknowledged.
+        '401':
+          description: The signature is missing, malformed, or does not match. Empty body.
+        '413':
+          description: The body exceeds 1 MiB.
+        '415':
+          description: Content-Type is not application/json.
+  /api/v1/admin/github-app/installations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      operationId: forgetGitHubAppInstallation
+      tags: [Workspace]
+      summary: Forget a locally synced GitHub App installation
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: Administrator only. Removes only the local record; it does not uninstall the app from GitHub. If the installation still exists there, the worker's next periodic sync recreates it.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      responses:
+        '204':
+          description: Forgotten.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/audit-logs:
+    get:
+      operationId: listAuditLogs
+      tags: [Workspace]
+      summary: List recorded workspace mutations
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Administrator only. Returns newest entries first from the separate
+        audit store. Cursors are opaque; pass the returned cursor unchanged to
+        continue. Audit entries contain only server-selected nonsecret metadata,
+        never request bodies, secret values, credentials, or tokens.
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of entries on this page; defaults to 50.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: Opaque continuation returned by the preceding page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of recorded audit entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/log-groups:
+    get:
+      operationId: listLogGroups
+      tags: [Workspace]
+      summary: List the operator-named log groups the Workspace may read
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Administrator only. Empty when this deployment has not configured Observability.
+      responses:
+        '200':
+          description: Operator-chosen display names, not raw CloudWatch log group names.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/logs/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: One of the operator-chosen display names listLogGroups returns.
+        schema:
+          type: string
+          minLength: 1
+    get:
+      operationId: queryLogs
+      tags: [Workspace]
+      summary: Read one bounded page of a named log group
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Administrator only. start and end are RFC 3339 timestamps; both are
+        required together, or both omitted to default to the last hour. The
+        window is bounded to 7 days. filter is CloudWatch's own
+        filter-pattern syntax, passed through unmodified.
+      parameters:
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: filter
+          in: query
+          schema:
+            type: string
+            maxLength: 2048
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+            maxLength: 8192
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+      responses:
+        '200':
+          description: One page of matching log events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/members:
+    get:
+      operationId: listMembers
+      tags: [Workspace]
+      summary: List every AppHub user who has signed in at least once
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Administrator only. There is no invite flow: an identity's User
+        record is created automatically on its first admitted sign-in, so a
+        person who has never signed in never appears here. Role is resolved
+        live from currently held directory entitlements, the same
+        computation UserView.role applies at sign-in -- it is not a stored
+        per-user field.
+      responses:
+        '200':
+          description: Every persisted user, most recently active first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MemberView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/directory/entitlements:
+    get:
+      operationId: listDirectoryEntitlements
+      tags: [Workspace]
+      summary: List entitlements synced from an operator-configured identity directory
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Administrator only. Empty when this deployment has not configured a directory source, or none has synced yet.
+      responses:
+        '200':
+          description: Every entitlement last synced from the directory.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DirectoryEntitlementView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/role-mappings:
+    get:
+      operationId: listRoleMappings
+      tags: [Workspace]
+      summary: List every directory entitlement mapped to an AppHub role
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Administrator only. Joined with the entitlement's synced display name where still available.
+      responses:
+        '200':
+          description: Every configured role mapping.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RoleMappingView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/role-mappings/{entitlementId}:
+    parameters:
+      - $ref: '#/components/parameters/EntitlementId'
+    put:
+      operationId: setRoleMapping
+      tags: [Workspace]
+      summary: Map a directory entitlement to an AppHub role
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Administrator only. entitlementId must name a currently synced,
+        bindable directory entitlement (DirectoryEntitlementView.bindable),
+        the "Group" the Workspace's Role assignment tab distinguishes from a
+        finer-grained directory-synced entry. Every identity holding a
+        current grant on that entitlement resolves to this role on its next
+        admission recheck, subject to its cached membership TTL.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleMappingInput'
+      responses:
+        '200':
+          description: The created or updated mapping.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleMappingView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      operationId: deleteRoleMapping
+      tags: [Workspace]
+      summary: Remove a directory entitlement's role mapping
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: Administrator only. Every identity that previously resolved a role through it falls back to whatever its remaining mapped entitlements, if any, grant.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      responses:
+        '204':
+          description: Removed.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/feature-flags:
+    get:
+      operationId: listFeatureFlags
+      tags: [Workspace]
+      summary: List every known feature flag and its current configuration
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: Administrator only. Always one entry per known flag key; an unconfigured flag reports mode "off" rather than being absent.
+      responses:
+        '200':
+          description: Every known feature flag.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeatureFlagView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/admin/feature-flags/{key}:
+    parameters:
+      - $ref: '#/components/parameters/FeatureFlagKey'
+    put:
+      operationId: setFeatureFlag
+      tags: [Workspace]
+      summary: Replace one known feature flag's configuration
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Administrator only. key must name a known flag. In "group" mode,
+        groupEntitlementIds must name currently synced, bindable directory
+        entitlements, the same requirement setRoleMapping applies to its own
+        entitlement argument. An identity holding any of those groups sees
+        the feature. "off" hides the feature from every identity, including
+        administrators; "on" shows it to every identity.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeatureFlagInput'
+      responses:
+        '200':
+          description: The updated flag.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureFlagView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/directory/applications:
+    get:
+      operationId: listDirectory
+      tags: [Applications]
+      summary: Discover every application in the workspace
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Any member may list every application as a summary: name, owners,
+        category, status and published URL. Nothing from the specification,
+        deployments, secrets or usage is included; the full application stays
+        readable only by its owner and administrators. owned reports whether the
+        caller may open it.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationSummaryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/directory/applications/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getDirectoryEntry
+      tags: [Applications]
+      summary: One application's summary, for a member who does not own it
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      responses:
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationSummary'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications:
+    get:
+      operationId: listApplications
+      tags: [Applications]
+      summary: List owned applications, or admin inventory
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: all
+          in: query
+          description: Admin-only opt-in to all applications; otherwise only the caller's applications.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: A successful empty inventory has items=[]; cursor is omitted at the end.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: createApplication
+      tags: [Applications]
+      summary: Create an owned draft without cloud mutation
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        The service assigns owner, ID, and initial revision. The target is immutable.
+        Public hostname reservation is atomic with creation. Submission is a
+        separate operation with a different idempotency key; if submission fails,
+        retain this draft's ID rather than create another application.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        $ref: '#/components/requestBodies/ApplicationInput'
+      responses:
+        '201':
+          description: Draft created, or original application returned for the same idempotent request.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getApplication
+      tags: [Applications]
+      summary: Read an owned or admin-accessible application
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      responses:
+        '200':
+          description: Current specification and distinct latest and last-successful deployment IDs.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    put:
+      operationId: updateApplication
+      tags: [Applications]
+      summary: Replace editable specification with optimistic concurrency
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Full replacement, not a patch. targetId must equal the original target.
+        Owner, IDs, artifacts, provider references, failure fields, and status are
+        never writable. Active queued/running or unresolved interrupted operations
+        block edits. Hostname release/claim and revision update are atomic. A stale
+        revision is 409; clients must reload rather than silently overwrite. No
+        applications:read scope is required for the internal ownership lookup.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        $ref: '#/components/requestBodies/ApplicationInput'
+      responses:
+        '200':
+          description: Updated application with a monotonically increased revision.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/deletion:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: deleteApplication
+      tags: [Applications]
+      summary: Durably accept deletion of an application and every resource it owns
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Queues a teardown operation that removes the application's workload,
+        database, key-value table, bucket (emptied first), secrets, workload
+        identity and image repository, then its hostname reservations,
+        deployment history and the application itself. Data is destroyed without
+        a snapshot. confirmName must equal the application's current name.
+
+        The owner or an administrator may delete. A queued deployment is
+        cancelled; a running one returns 409 until it finishes; an interrupted
+        one is superseded. Once accepted the application is read-only for good:
+        it cannot be updated or deployed, only deleted.
+
+        Poll statusUrl like a deployment. Transient provider failures are
+        retried with backoff, and a teardown whose worker stops is requeued
+        automatically. If a teardown fails, status becomes deletion_failed and
+        calling this again (with a new idempotency key) retries it; every step is
+        idempotent. When the teardown succeeds the application and its
+        operations return 404.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteApplicationInput'
+      responses:
+        '202':
+          description: Durable teardown accepted, not confirmed deleted; poll statusUrl.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              description: Wait two seconds before polling the durable status resource.
+              schema:
+                type: integer
+                const: 2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentAccepted'
+        '204':
+          description: The application had never been deployed, so it and its records were deleted immediately. There is nothing to poll.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/directory/principals:
+    get:
+      operationId: searchPrincipals
+      tags: [Applications]
+      summary: Find people and directory groups that can own an application
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Any member may search AppHub users (people who have signed in at least
+        once) and synced directory groups by name or email, to choose an
+        application's owners. Results are bounded; refine q for more.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 200
+          description: Case-insensitive substring of a name, email or group name. Empty lists the first results.
+      responses:
+        '200':
+          description: Matching users and groups, at most 25 of each.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalSearchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/owners:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: listOwners
+      tags: [Applications]
+      summary: List an application's owners
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      responses:
+        '200':
+          description: Every owner, users first, each with a display name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnerList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: addOwner
+      tags: [Applications]
+      summary: Add a user or directory group as an owner
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Any owner or administrator may add an owner. All owners are equal: each
+        may edit, deploy, delete and change owners. A group owner makes everyone
+        currently holding that directory entitlement an owner, rechecked on
+        every request. Adding an existing owner changes nothing. Ownership does
+        not change the application revision, so it never conflicts with a
+        queued deployment. Refused while the application is being deleted.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OwnerInput'
+      responses:
+        '200':
+          description: The owner set after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnerList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/owners/{ownerKey}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - name: ownerKey
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^(user|group):.+$'
+        description: The owner's key, kind:id.
+    delete:
+      operationId: removeOwner
+      tags: [Applications]
+      summary: Remove an owner
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write']
+      description: |
+        Any owner or administrator may remove any owner, including themselves.
+        Removing the last owner returns 409 last_owner. Removing an owner that is
+        not one changes nothing.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      responses:
+        '200':
+          description: The owner set after the change. It may no longer include the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnerList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/usage:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getApplicationUsage
+      tags: [Applications]
+      summary: Hourly request counts for an application's public routes
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Derived from ingress access logs by the worker every few minutes, so the
+        latest hour may lag. Only published (public) routes pass through the
+        ingress; a private application reports tracked=false. collecting is false
+        when the operator has not configured traffic collection. Buckets are
+        hourly, UTC, oldest first, and include only hours with requests.
+      parameters:
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['24h', '7d', '30d']
+            default: '7d'
+      responses:
+        '200':
+          description: Usage for the requested window.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/secrets:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: listApplicationSecrets
+      tags: [Applications]
+      summary: List an application's secret names, never their values
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:read']
+      description: |
+        Returns names and last-change metadata only. No endpoint ever returns a
+        secret value. available is false when the operator has not configured the
+        secret handoff key; changes are then refused with 503.
+      responses:
+        '200':
+          description: Secret names in name order; a genuine empty set has items=[].
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/secrets/deployments:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: deploySecretChanges
+      tags: [Deployments]
+      summary: Apply a batch of secret changes by deploying the current revision
+      security:
+        - SessionCookie: []
+        - OAuth: ['applications:write', 'deployments:write']
+      description: |
+        Save and redeploy as one operation. Each set value is encrypted with the
+        operator's handoff KMS key (encrypt-only for the API) under an encryption
+        context naming the application, secret, and deployment, and only the
+        ciphertext is stored on the deployment record. The worker decrypts it,
+        writes an SSM SecureString through the target's secret store, binds every
+        current secret as an environment variable, and deletes the ciphertext when
+        the deployment finishes. When the last successful deployment was of this
+        same revision, its image and commit are reused: no source is fetched and
+        nothing is built; only the task definition and service are updated.
+        Otherwise the revision is built first. Same revision, active-lock, idempotency, and
+        readiness rules as submitDeployment. The idempotency request hash covers
+        names and actions, never values. The request body is limited to 128 KiB,
+        so a batch of many large values may need to be split across deployments.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SecretChangesInput'
+      responses:
+        '202':
+          description: Durable operation accepted, not confirmed deployed; poll statusUrl.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/applications/{id}/deployments:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: listDeployments
+      tags: [Deployments]
+      summary: List durable deployment history for an accessible application
+      security:
+        - SessionCookie: []
+        - OAuth: ['deployments:read']
+      description: Each attempt retains its requested application revision and source ref. Pages are newest first, so a limit returns the latest attempts. Internal ownership lookup does not require applications:read.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Paginated deployment attempts, newest first; a genuine empty history has items=[].
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: submitDeployment
+      tags: [Deployments]
+      summary: Durably accept an immutable application revision for deployment
+      security:
+        - SessionCookie: []
+        - OAuth: ['deployments:write']
+      description: |
+        Atomically stores deployment intent, the application's active pointer, and
+        idempotency result before replying. Only one deployment can be active per
+        application. Stale application revision and unresolved interrupted locks
+        return 409. Missing, stale, or policy-mismatched worker readiness returns
+        503, without creating a substitute target or loading cloud credentials in
+        the API. Eligibility is rechecked before queued work starts. No request
+        handler owns a deployment goroutine; disconnection does not cancel work.
+        No applications:read scope is needed for the ownership lookup. Replaying
+        an accepted request returns the original deployment ID, even if its state
+        has since advanced. There is no automatic retry or rollback.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitDeploymentInput'
+      responses:
+        '202':
+          description: Durable operation accepted, not confirmed deployed; poll statusUrl.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              description: Wait two seconds before polling the durable status resource.
+              schema:
+                type: integer
+                const: 2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/deployments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getDeployment
+      tags: [Deployments]
+      summary: Observe a durable deployment operation
+      security:
+        - SessionCookie: []
+        - OAuth: ['deployments:read']
+      description: |
+        Observation remains available while a worker is unavailable. Poll every
+        pollAfterMs while terminal is false. Service success requires the requested
+        effective replica count ready. Scheduled success means the schedule was
+        installed, not that a future execution succeeded. Interrupted means an
+        uncertain provider outcome with retained partial resources and execution
+        lock; it does not mean rollback. Raw runtime/build logs are not exposed.
+      responses:
+        '200':
+          description: Safe current operation state and partial-resource summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/deployments/{id}/resolve-interrupted:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: resolveInterruptedDeployment
+      tags: [Deployments]
+      summary: Record an admin acknowledgement and release an interrupted execution lock
+      security:
+        - SessionCookie: []
+        - OAuth: ['deployments:write']
+      description: |
+        Requires effective admin authority as well as deployments:write for bearer
+        callers. The operator must first stop the old worker and build container.
+        This action records the nonempty reason and workerStopped acknowledgement,
+        releases the application lock, and keeps the deployment interrupted. It
+        does not declare success, delete resources, resume a step, or retry work.
+        Any later explicit deployment is a new operation using retained artifacts.
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveInterruptedInput'
+      responses:
+        '200':
+          description: Interrupted operation with recorded resolution reason.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidSpecification'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/sessions:
+    get:
+      operationId: listSessions
+      tags: [Sessions]
+      summary: List the current user's browser sessions and OAuth families
+      description: |
+        Any valid nonempty granted OAuth scope suffices. Includes only the caller's
+        sessions, even for admins. IDs are nonsecret display IDs, not session bearer
+        values, token hashes, or refresh credentials.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Own browser and delegated sessions.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      operationId: revokeSession
+      tags: [Sessions]
+      summary: Revoke an own browser session or entire OAuth family
+      description: |
+        Requires the user's browser session with exact Origin and CSRF protection.
+        Delegated bearer tokens cannot manage unrelated sessions; clients revoke
+        their own credentials through /oauth/revoke. Only the caller's display IDs
+        are accepted. Revoking a delegated session durably revokes its whole family.
+        A storage failure is not successful revocation.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/ConditionalOrigin'
+        - $ref: '#/components/parameters/ConditionalCSRF'
+      responses:
+        '204':
+          description: Session or family durably revoked.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/oauth/consents/{transactionId}:
+    get:
+      operationId: getConsent
+      tags: [OAuth]
+      summary: Read safe server-bound consent details
+      security:
+        - SessionCookie: []
+      description: |
+        Requires the exact browser session bound to the five-minute transaction.
+        The UI renders this stored view, never client-supplied scope, redirect,
+        resource, or identity query parameters. Consumed or expired transactions
+        are not approvable.
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: Bound consent view for the signed-in browser.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentView'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /.well-known/oauth-authorization-server:
+    get:
+      operationId: getAuthorizationServerMetadata
+      tags: [OAuth]
+      summary: Discover the AppHub public-client OAuth authorization server
+      security: []
+      description: |
+        Issuer is exactly publicOrigin. This is independent of upstream Google/OIDC
+        login and workload identity. Only authorization-code and refresh grants are
+        supported. Public clients authenticate with none and use S256 PKCE. No
+        device grant, dynamic registration, introspection, or JWT/JWKS endpoint is
+        provided. Only this exact discovery route is supported, not wildcard suffixes.
+      responses:
+        '200':
+          description: Authorization server metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizationServerMetadata'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /.well-known/oauth-protected-resource/api:
+    get:
+      operationId: getAPIResourceMetadata
+      tags: [OAuth]
+      summary: Discover the exact API OAuth resource
+      security: []
+      responses:
+        '200':
+          description: resource is exactly {publicOrigin}/api.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProtectedResourceMetadata'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /.well-known/oauth-protected-resource/mcp:
+    get:
+      operationId: getMCPResourceMetadata
+      tags: [OAuth]
+      summary: Discover the exact remote MCP OAuth resource
+      security: []
+      responses:
+        '200':
+          description: resource is exactly {publicOrigin}/mcp; an API token is not valid here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProtectedResourceMetadata'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /oauth/authorize:
+    get:
+      operationId: beginAuthorization
+      tags: [OAuth]
+      summary: Validate an OAuth request and begin browser-bound consent
+      security: []
+      description: |
+        Validates all parameters before redirecting. Unauthenticated browsers use
+        the normal provider picker and resume this request after login. Stores a
+        five-minute consent transaction binding session, user, client, exact
+        redirect, state, resource, exact scopes, and PKCE, then opens /authorize.
+        The built-in public client apphub-cli uses http://127.0.0.1:<ephemeral-port>/callback
+        with no userinfo, query, or fragment. Operator-registered remote clients
+        require exact HTTPS redirects. Remote client IDs may be HTTPS Client ID
+        Metadata Document URLs; bounded, nonredirecting, public-IP-pinned fetching
+        verifies exact client_id and public none authentication. No private,
+        link-local, metadata, redirect, or environment-proxy fetch is permitted.
+        Neither wildcard callbacks nor anonymous dynamic registration are supported.
+        Never redirect an error until the client and redirect URI have been validated.
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            const: code
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+        - name: resource
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/OAuthResource'
+        - name: scope
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/ScopeString'
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{43}$'
+            description: Unpadded base64url SHA-256 of a PKCE verifier.
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            const: S256
+      responses:
+        '302':
+          description: |
+            Redirect to sign-in, local consent UI, or a validated OAuth error
+            callback. Callback responses include the original state and exact iss.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/OAuthBadRequest'
+        '429':
+          $ref: '#/components/responses/OAuthRateLimited'
+        '503':
+          $ref: '#/components/responses/OAuthUnavailable'
+    post:
+      operationId: decideConsent
+      tags: [OAuth]
+      summary: Atomically consume bound consent and approve or deny
+      security:
+        - SessionCookie: []
+      description: |
+        Requires the exact bound browser session, Origin, and CSRF token. Accepts
+        only transactionId and literal action. Redirect, resource, scope, client,
+        state, and PKCE come only from the stored transaction. A transaction is
+        single-use; denial produces access_denied and no code. Approval produces
+        a single-use five-minute authorization code. Success and denial callback
+        URLs both include the correlated state and exact issuer in iss (RFC 9207).
+        Codes and transactions are never exposed in logs or diagnostic bodies.
+        Returns a JSON redirectUrl for explicit browser navigation; it does not
+        make fetch follow an external redirect with browser credentials.
+      parameters:
+        - $ref: '#/components/parameters/RequiredOrigin'
+        - $ref: '#/components/parameters/RequiredCSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentDecisionInput'
+      responses:
+        '200':
+          description: Bound callback URL with code or error, state, and iss; navigate the browser explicitly.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentDecisionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /oauth/token:
+    post:
+      operationId: exchangeToken
+      tags: [OAuth]
+      summary: Exchange a bound code or rotate a refresh token
+      security: []
+      description: |
+        Public clients use client_id and no client secret. Code exchange requires
+        exact client, redirect, resource, and a matching S256 verifier, atomically
+        consumes the code, and creates an active OAuth family and tokens. Access
+        tokens are opaque, valid for 15 minutes, and bound to exactly one resource.
+        OAuth families have an absolute 30-day lifetime that refresh never extends.
+        Refresh checks family state, expiry, client, resource, and current user
+        eligibility, then atomically consumes and rotates the refresh token.
+        Consumed refresh token replay revokes the entire family; revocation cannot
+        be undone by a concurrent refresh. Clients must reauthenticate after an
+        uncertain refresh transport outcome rather than replay a possibly consumed
+        token. Credential failures use generic invalid_grant, not provider details;
+        storage failures remain unavailable. Bearer authentication checks active
+        token, family, audience, and current eligibility on every request.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/AuthorizationCodeExchange'
+                - $ref: '#/components/schemas/RefreshTokenExchange'
+      responses:
+        '200':
+          description: New access token and rotated refresh token; never cache.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Pragma:
+              description: Legacy cache prevention.
+              schema:
+                type: string
+                const: no-cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/OAuthBadRequest'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '429':
+          $ref: '#/components/responses/OAuthRateLimited'
+        '503':
+          $ref: '#/components/responses/OAuthUnavailable'
+  /oauth/revoke:
+    post:
+      operationId: revokeOAuthToken
+      tags: [OAuth]
+      summary: Durably revoke the OAuth family associated with a token
+      security: []
+      description: |
+        Public-client revocation with client_id and the token, not browser cookies.
+        Unknown or already revoked tokens return the same success without revealing
+        validity. A known token must match the client. Family revocation invalidates
+        all associated access/refresh tokens and persists across concurrent refresh.
+        Storage failure is unavailable, not successful revocation.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/RevokeTokenInput'
+      responses:
+        '200':
+          description: Revocation processed; empty response, including for unknown tokens.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/OAuthBadRequest'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '429':
+          $ref: '#/components/responses/OAuthRateLimited'
+        '503':
+          $ref: '#/components/responses/OAuthUnavailable'
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-apphub_session
+      description: |
+        Host-only Secure HttpOnly SameSite=Lax session, Path=/, no Domain. Explicit
+        loopback HTTP uses apphub_session instead. Cookie mutations require exact
+        Origin and X-CSRF-Token. Never accepted as an OAuth token or at /mcp.
+    OAuth:
+      type: oauth2
+      description: |
+        Opaque AppHub bearer tokens only. API operations require resource exactly
+        {publicOrigin}/api; MCP requires {publicOrigin}/mcp. Send the resource in
+        both authorization and code exchange. Scope names are exact set members,
+        not prefixes. Every token must have at least one known scope. The empty
+        requirement list on user/session operations means any nonempty granted
+        scope is sufficient, not an unscoped token. Browser sessions do not need
+        OAuth scopes. Invalid Authorization never falls back to a cookie.
+      flows:
+        authorizationCode:
+          authorizationUrl: /oauth/authorize
+          tokenUrl: /oauth/token
+          refreshUrl: /oauth/token
+          scopes:
+            applications:read: Read accessible applications and safe target options.
+            applications:write: Create and edit accessible applications.
+            deployments:read: Read accessible deployment operations and history.
+            deployments:write: Submit deployments; resolve interrupted work only if also admin.
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: Opaque server-generated resource or nonsecret session display ID.
+      schema:
+        type: string
+        minLength: 1
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    EntitlementId:
+      name: entitlementId
+      in: path
+      required: true
+      description: A directory entitlement's ID (DirectoryEntitlementView.id).
+      schema:
+        type: string
+        minLength: 1
+    FeatureFlagKey:
+      name: key
+      in: path
+      required: true
+      description: A known feature flag's key (FeatureFlagView.key).
+      schema:
+        type: string
+        minLength: 1
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque continuation returned by the same collection; do not parse or construct it.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Stable nonempty key for one principal and operation. Same canonical request
+        returns original IDs; changed request returns 409 idempotency_conflict.
+        Use distinct keys for draft creation and deployment submission. Missing or
+        malformed keys return 400. Preserve the key when retrying uncertain writes.
+      schema:
+        type: string
+        minLength: 1
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: |
+        Strong ETag containing the expected application revision as a quoted
+        positive decimal integer, for example "3". Wildcard and weak validators
+        are not accepted. Missing/malformed preconditions return 400; a stale
+        revision returns 409, not a silent overwrite.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+      example: '"3"'
+    ConditionalOrigin:
+      name: Origin
+      in: header
+      description: Required with cookie authentication; must exactly equal publicOrigin. Not required for API bearer authentication.
+      schema:
+        type: string
+        format: uri
+    ConditionalCSRF:
+      name: X-CSRF-Token
+      in: header
+      description: Required with cookie authentication; must match the session-bound csrfToken from users/me. Not required for bearer authentication.
+      schema:
+        type: string
+        minLength: 1
+    RequiredOrigin:
+      name: Origin
+      in: header
+      required: true
+      description: Must exactly equal configured publicOrigin; missing and foreign origins are rejected.
+      schema:
+        type: string
+        format: uri
+    RequiredCSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Session-bound csrfToken from users/me; checked together with the exact Origin.
+      schema:
+        type: string
+        minLength: 1
+  headers:
+    ETag:
+      description: Strong quoted application revision; send unchanged in If-Match when updating.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+      example: '"3"'
+    Location:
+      description: Redirect target or durable deployment status URI, depending on the operation.
+      schema:
+        type: string
+        format: uri-reference
+    NoStore:
+      description: Sensitive authentication/session/token responses are never cached.
+      schema:
+        type: string
+        const: no-store
+    Authenticate:
+      description: |
+        Bearer challenge with resource_metadata pointing to the exact protected
+        resource metadata URL. API uses {publicOrigin}/.well-known/oauth-protected-resource/api;
+        MCP uses {publicOrigin}/.well-known/oauth-protected-resource/mcp. Credential
+        errors use invalid_token without token details.
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds before another request should be attempted.
+      schema:
+        type: integer
+        minimum: 1
+  requestBodies:
+    ApplicationInput:
+      required: true
+      description: Full editable specification, limited to 64 KiB serialized and the target's current policy.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApplicationInput'
+  responses:
+    BadRequest:
+      description: Malformed JSON, unknown field, invalid query/header, or missing required precondition.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthenticated:
+      description: Missing, expired, revoked, ineligible, or invalid authentication; no cookie fallback after invalid bearer.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/Authenticate'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Insufficient exact scope or role, denied admission, or missing/invalid browser Origin or CSRF token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource missing or inaccessible to this principal; cross-owner IDs do not reveal existence.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: |
+        Revision mismatch, idempotency_conflict, active deployment, unresolved
+        interrupted lock, hostname reservation conflict, or invalid state transition.
+        No cloud mutation is initiated by a rejected request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooLarge:
+      description: JSON request exceeds 128 KiB or serialized application specification exceeds 64 KiB; never truncated.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InvalidSpecification:
+      description: Invalid or unsupported specification, unavailable capability, target policy violation, or invalid operator acknowledgement.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Request limit reached.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unavailable:
+      description: Required storage, authentication provider, target configuration, or worker readiness unavailable; retryable, never an empty success.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    OAuthBadRequest:
+      description: Invalid OAuth request or grant; credential failures use generic invalid_grant.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OAuthError'
+    OAuthRateLimited:
+      description: OAuth request rate limited.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OAuthError'
+    OAuthUnavailable:
+      description: OAuth dependency unavailable; not an invalid credential or successful revocation.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OAuthError'
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable service-authored classification, never a raw provider error.
+        message:
+          type: string
+          description: Safe user-facing explanation, not a stack trace or build log.
+        fieldErrors:
+          type: object
+          additionalProperties:
+            type: string
+          description: Editable field path to safe validation explanation.
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, requestId]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+        requestId:
+          type: string
+    AuditEntry:
+      type: object
+      additionalProperties: false
+      required: [id, occurredAt, actor, action, target]
+      properties:
+        id:
+          type: string
+          description: Stable unique audit entry identifier.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Time the mutation was recorded, in UTC.
+        actor:
+          type: string
+          description: Identity responsible for the mutation.
+        action:
+          type: string
+          description: Server-defined mutation name.
+        target:
+          type: string
+          description: Nonsecret identifier of the affected resource.
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional allowlisted, nonsecret context fields; never raw request payloads.
+    AuditPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        cursor:
+          type: string
+          description: Opaque continuation; omitted or empty when exhausted.
+    ExecutionMode:
+      type: string
+      enum: [service, scheduled]
+      description: Container service or scheduled container; function workloads are not offered.
+    ApplicationStatus:
+      type: string
+      enum: [draft, deploying, running, failed, interrupted, deleting, deletion_failed]
+      description: |
+        No deployment means draft, never healthy. Latest failure does not erase last successful deployment.
+        deleting means a teardown is queued or running; deletion_failed means the last teardown failed
+        and can be retried through deleteApplication.
+    DeploymentState:
+      type: string
+      enum: [queued, running, succeeded, failed, interrupted]
+      description: Only queued and running are nonterminal. Interrupted is an uncertain outcome, not rollback.
+    SourceInput:
+      type: object
+      additionalProperties: false
+      required: [url, ref, dockerfile]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Canonical repository URL with no query, fragment, or embedded credentials. When the target lists repositories, the URL must be one of them; otherwise it must belong to a synced GitHub App installation.
+        ref:
+          type: string
+          maxLength: 256
+          description: Branch/tag/ref; empty selects the default branch when the worker resolves it. No option prefixes or controls; Git ref grammar is enforced.
+        dockerfile:
+          type: string
+          minLength: 1
+          description: Clean relative path within the repository; no absolute path, traversal, backslash, or escaping symlink.
+    ResourceInput:
+      type: object
+      additionalProperties: false
+      required: [cpu, memory]
+      properties:
+        cpu:
+          type: integer
+          minimum: 1
+          description: CPU millicores; the cpu/memory pair must equal an allowed target resource size.
+        memory:
+          type: integer
+          minimum: 1
+          description: Memory MiB, not bytes or GiB.
+    ScheduleInput:
+      type: object
+      additionalProperties: false
+      required: [expression, timezone, paused]
+      properties:
+        expression:
+          type: string
+          minLength: 1
+          description: Explicit provider-supported schedule expression; required for scheduled execution.
+        timezone:
+          type: string
+          description: Schedule timezone; validation follows the selected provider's supported schedule contract.
+        paused:
+          type: boolean
+          description: Whether the installed schedule is paused.
+    CapacityInput:
+      type: object
+      additionalProperties: false
+      required: [minUnits, maxUnits]
+      properties:
+        minUnits:
+          type: number
+          format: double
+          description: Lower relational capacity bound in provider-neutral units; subject to target/provider validation.
+        maxUnits:
+          type: number
+          format: double
+          description: Upper relational capacity bound in provider-neutral units, not AWS-specific ACUs.
+    DatabaseKind:
+      type: string
+      enum: ['', relational, key-value]
+      description: Empty means no database. The target advertises only available kinds.
+    DatabaseInput:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      description: |
+        Editable database settings only. Omit for no database (empty kind also means
+        none). No existing database reference, password, connection secret, raw
+        resource name, or IAM fields are accepted. databaseName is the logical SQL
+        database name, not a cloud resource identifier. Provider/module capability
+        validation may further restrict engines and capacities.
+      properties:
+        kind:
+          $ref: '#/components/schemas/DatabaseKind'
+        engine:
+          type: string
+          enum: [postgres, mysql]
+          description: Relational SQL dialect; only engines supported by the selected provider may be deployed.
+        engineVersion:
+          type: string
+          description: Relational engine major version supported by the provider.
+        databaseName:
+          type: string
+          description: Logical relational database name.
+        adminUsername:
+          type: string
+          description: Relational database administrative username; no password input is accepted.
+        capacity:
+          $ref: '#/components/schemas/CapacityInput'
+        extensions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [btree_gin, btree_gist, citext, fuzzystrmatch, hstore, pg_trgm, pgcrypto, unaccent, uuid-ossp, vector]
+          description: Exact allowlisted PostgreSQL extension names. Only supported for relational databases with the postgres engine; duplicates are rejected.
+        partitionKey:
+          type: string
+          description: Key-value partition key attribute name. When omitted, the table is keyed by partition key "pk" and sort key "sk".
+        sortKey:
+          type: string
+          description: Optional key-value sort key attribute name. Omitting it alongside a partitionKey creates a table with no sort key.
+      allOf:
+        - if:
+            properties:
+              kind:
+                const: relational
+          then:
+            required: [engine, databaseName, adminUsername]
+    BucketKind:
+      type: string
+      enum: ['', standard, zonal]
+      description: Empty means no bucket; analytic table/vector buckets are not supported by this deployment module.
+    BucketInput:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      description: |
+        Omit for no bucket. Bucket names are derived server-side; raw names and
+        provider references are not accepted. Optional access follows the module's
+        read-write default when absent; workloads cannot request admin access.
+      properties:
+        kind:
+          $ref: '#/components/schemas/BucketKind'
+        zone:
+          type: string
+          description: Zone for a zonal bucket, subject to operator/provider placement validation.
+        access:
+          type: string
+          enum: [read, read-write]
+    PublicPathInput:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^/[A-Za-z0-9._~!$&''()+,;=:@/*-]*$'
+          description: |
+            Exempts this exact path from sign-in. Matching is exact; end with /*
+            to also exempt everything below the prefix. A bare /* is refused --
+            turn signInRequired off instead of exempting every path. No query
+            string, fragment, percent-encoding, .. segment, or empty // segment;
+            at most 32 entries per exposure.
+        note:
+          type: string
+          maxLength: 120
+          description: Free-text reminder of what calls this path (for example "Stripe webhook"), never interpreted.
+      description: One sign-in exemption on an otherwise-authenticated route.
+    PrivateExposure:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          const: private
+        hostname:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          description: |
+            Optional label under the target's internal route domain. Omitted, a
+            stable label is derived from the application ID. Refused when the target
+            has no internal ingress (TargetView.internalExposure is false).
+        signInRequired:
+          type: boolean
+          description: |
+            Gate this route behind the platform's sign-in proxy. Omitted or true
+            requires sign-in -- today's only behavior, preserved for every
+            existing record and client that predates this field. false
+            publishes the route to anyone who can reach it, subject only to
+            the network boundary an internal ingress already provides.
+            Refused with a non-default value (false, or a non-empty
+            publicPaths) when this exposure has no route to apply it to: no
+            internal ingress on the target, or a scheduled execution mode.
+        publicPaths:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/PublicPathInput'
+          description: |
+            Paths that bypass sign-in while signInRequired is true. Kept on
+            the record and inert while signInRequired is false -- every path
+            is already unauthenticated then -- so the rules are ready to take
+            effect again the moment sign-in is turned back on.
+      description: |
+        Not reachable from the internet. On a target with an internal ingress, a
+        service is published at https://<hostname>.<internal route domain> through
+        the internal load balancer and, by default, the platform's sign-in, so its
+        requests are counted like a public application's. Without one, a private
+        application has no route at all and nothing can open a connection to it.
+    PublicExposure:
+      type: object
+      additionalProperties: false
+      required: [mode, hostname]
+      properties:
+        mode:
+          type: string
+          const: public
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+          description: One lowercase DNS label under the operator's configured suffix; never a raw FQDN or certificate reference.
+        signInRequired:
+          type: boolean
+          description: |
+            Gate this route behind the platform's sign-in proxy. Omitted or true
+            requires sign-in -- today's only behavior, preserved for every
+            existing record and client that predates this field. false
+            publishes the route to anyone with the URL; the caller acknowledging
+            public exposure below already covers that anyone the identity
+            provider admits can reach it, this goes further to anyone at all.
+        publicPaths:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/PublicPathInput'
+          description: |
+            Paths that bypass sign-in while signInRequired is true. Kept on
+            the record and inert while signInRequired is false -- every path
+            is already unauthenticated then -- so the rules are ready to take
+            effect again the moment sign-in is turned back on.
+        mcpAuthEnabled:
+          type: boolean
+          description: |
+            Protect the application's /mcp endpoint with AppHub OAuth. AppHub
+            publishes MCP protected-resource discovery on the application
+            hostname, injects verified X-AppHub-User-ID and X-AppHub-Email
+            headers, and strips the bearer token before forwarding. Independent
+            of signInRequired: /mcp uses this instead of the sign-in proxy
+            either way.
+      description: |
+        Explicit public TLS publication for a service, if the target permits it.
+        By default the platform authenticates requests with oauth2-proxy before
+        they reach the application, so the application can assume the caller is
+        already signed in; signInRequired=false turns that off and publishes the
+        route to anyone who can open the URL. Clients must ask the user to
+        acknowledge that identities admitted by the identity provider can open
+        the address. Plaintext is not offered. When mcpAuthEnabled is set, /mcp
+        is instead protected by AppHub OAuth: AppHub publishes protected-resource
+        discovery, injects verified identity headers, and strips the bearer
+        token before forwarding that path. Other paths follow signInRequired.
+    ExposureInput:
+      oneOf:
+        - $ref: '#/components/schemas/PrivateExposure'
+        - $ref: '#/components/schemas/PublicExposure'
+      discriminator:
+        propertyName: mode
+        mapping:
+          private: '#/components/schemas/PrivateExposure'
+          public: '#/components/schemas/PublicExposure'
+    ApplicationInput:
+      type: object
+      additionalProperties: false
+      required: [name, targetId, source, execution, port, resources, replicas, exposure]
+      description: |
+        Editable container specification only. Target choice is immutable after
+        creation. Explicit resource, execution, port, replicas, Dockerfile, and
+        exposure values must be submitted; clients derive choices from TargetView,
+        not hardcoded provider defaults. Unknown owner/ID/artifact/status/function/
+        label/IAM/secret/reference fields are rejected. Serialized size <=64 KiB.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Nonblank application name without control characters; server also bounds UTF-8 bytes to 100.
+        targetId:
+          type: string
+          minLength: 1
+        source:
+          $ref: '#/components/schemas/SourceInput'
+        execution:
+          $ref: '#/components/schemas/ExecutionMode'
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        resources:
+          $ref: '#/components/schemas/ResourceInput'
+        replicas:
+          type: integer
+          minimum: 1
+          description: Must not exceed target.maxReplicas; submitted even for scheduled execution.
+        schedule:
+          $ref: '#/components/schemas/ScheduleInput'
+        database:
+          $ref: '#/components/schemas/DatabaseInput'
+        bucket:
+          $ref: '#/components/schemas/BucketInput'
+        exposure:
+          $ref: '#/components/schemas/ExposureInput'
+        category:
+          type: string
+          maxLength: 64
+          description: |
+            Optional CategoryView key used only to group applications in the portal;
+            empty or absent means uncategorized. A new or changed value must be listed
+            by /api/v1/categories; an unchanged value is kept even if since retired.
+      allOf:
+        - if:
+            properties:
+              execution:
+                const: scheduled
+          then:
+            required: [schedule]
+            properties:
+              exposure:
+                $ref: '#/components/schemas/PrivateExposure'
+        - if:
+            properties:
+              execution:
+                const: service
+          then:
+            not:
+              required: [schedule]
+    ApplicationView:
+      type: object
+      additionalProperties: false
+      required: [id, owners, revision, specification, status, addresses, permittedActions, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        owners:
+          type: array
+          items:
+            $ref: '#/components/schemas/OwnerView'
+          description: Never empty. All owners are equal.
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        specification:
+          $ref: '#/components/schemas/ApplicationInput'
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        activeDeploymentId:
+          type: string
+          format: uuid
+          description: Retained for unresolved interrupted work as well as active queued/running work.
+        latestDeploymentId:
+          type: string
+          format: uuid
+        lastSuccessfulDeploymentId:
+          type: string
+          format: uuid
+          description: Preserved separately from the latest unsuccessful attempt.
+        lastDeployedAt:
+          type: string
+          format: date-time
+          description: When the last successful deployment finished. Absent until one has.
+        deletionRequestedAt:
+          type: string
+          format: date-time
+          description: When deletion was first requested. Present from then until the application is gone.
+        url:
+          type: string
+          description: |
+            Where the application is published (https://host, no path), derived from its route and the
+            target's domain, so it is known before the first deploy. It is live
+            once it also appears in addresses. Absent when there is no route.
+        urlScope:
+          type: string
+          enum: [public, internal]
+          description: public is reachable from the internet; internal only inside the network.
+        addresses:
+          type: array
+          items:
+            type: string
+          description: Safe provider-reported addresses, not client-guessed domains.
+        permittedActions:
+          type: array
+          items:
+            type: string
+          description: Effective caller actions after ownership, scope, and operation-state checks.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UsageBucket:
+      type: object
+      additionalProperties: false
+      required: [hour, requests, status2xx, status3xx, status4xx, status5xx]
+      properties:
+        hour:
+          type: string
+          format: date-time
+          description: Start of the UTC hour.
+        requests:
+          type: integer
+          format: int64
+        status2xx:
+          type: integer
+          format: int64
+        status3xx:
+          type: integer
+          format: int64
+        status4xx:
+          type: integer
+          format: int64
+        status5xx:
+          type: integer
+          format: int64
+    UsageView:
+      type: object
+      additionalProperties: false
+      required: [range, since, buckets, totalRequests, collecting, tracked]
+      properties:
+        range:
+          type: string
+          enum: ['24h', '7d', '30d']
+        since:
+          type: string
+          format: date-time
+          description: Start of the first hour in the window.
+        buckets:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageBucket'
+        totalRequests:
+          type: integer
+          format: int64
+          description: Requests in the window.
+        firstRequestAt:
+          type: string
+          format: date-time
+          description: Earliest request ever recorded. Absent if the application has never had traffic.
+        lastRequestAt:
+          type: string
+          format: date-time
+          description: Most recent request recorded.
+        collectedAt:
+          type: string
+          format: date-time
+          description: When the worker last updated this application's usage.
+        collecting:
+          type: boolean
+          description: False when traffic collection is not configured for this installation.
+        tracked:
+          type: boolean
+          description: False for a private application, whose requests never pass through the ingress.
+    ApplicationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, owners, owned, yours, status, live, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        category:
+          type: string
+        owners:
+          type: array
+          items:
+            $ref: '#/components/schemas/OwnerView'
+          description: Never empty; users first.
+        owned:
+          type: boolean
+          description: The caller owns the application or is an administrator, and may open it in full.
+        yours:
+          type: boolean
+          description: The caller is an owner, directly or through a group they hold. Unlike owned, an administrator's override does not count.
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        url:
+          type: string
+        urlScope:
+          type: string
+          enum: [public, internal]
+        live:
+          type: boolean
+          description: url was reported live by the last successful deploy.
+        lastDeployedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    ApplicationSummaryPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicationSummary'
+        cursor:
+          type: string
+    SecretView:
+      type: object
+      additionalProperties: false
+      required: [name, updatedAt]
+      properties:
+        name:
+          type: string
+          description: Environment variable the running application sees.
+        updatedAt:
+          type: string
+          format: date-time
+          description: When a deployment request last set this secret; not proof the deployment succeeded.
+    OwnerKind:
+      type: string
+      enum: [user, group]
+      description: A user is an AppHub user; a group is a synced directory entitlement whose current holders are owners.
+    OwnerInput:
+      type: object
+      additionalProperties: false
+      required: [kind, id]
+      properties:
+        kind:
+          $ref: '#/components/schemas/OwnerKind'
+        id:
+          type: string
+          description: A user ID, or a directory entitlement ID from searchPrincipals.
+    OwnerView:
+      type: object
+      additionalProperties: false
+      required: [kind, id, key, name]
+      properties:
+        kind:
+          $ref: '#/components/schemas/OwnerKind'
+        id:
+          type: string
+        key:
+          type: string
+          description: kind:id, used to remove this owner.
+        name:
+          type: string
+          description: A user's display name or email, or a group's display name. The ID when neither is known.
+        email:
+          type: string
+          description: A user owner's email, when known.
+        avatar:
+          type: string
+          description: A user owner's avatar URL, when known.
+    OwnerList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OwnerView'
+    PrincipalSearchResult:
+      type: object
+      additionalProperties: false
+      required: [users, groups]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/OwnerView'
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/OwnerView'
+    SecretList:
+      type: object
+      additionalProperties: false
+      required: [items, available]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecretView'
+        available:
+          type: boolean
+          description: False when secret changes cannot be accepted because no handoff key is configured.
+    SecretChange:
+      type: object
+      additionalProperties: false
+      required: [name, action]
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Z_][A-Z0-9_]*$'
+          maxLength: 100
+          description: Environment variable name. Platform-reserved names (PORT, DATABASE_*, APPHUB_*, AWS_*, ECS_*) are rejected.
+        action:
+          type: string
+          enum: [set, delete]
+        value:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Required for set and forbidden for delete. Write-only; never returned.
+    SecretChangesInput:
+      type: object
+      additionalProperties: false
+      required: [applicationRevision, changes]
+      properties:
+        applicationRevision:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Exact current application revision to deploy; stale revisions return 409.
+        changes:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: At most one change per name. An application holds at most 50 secrets.
+          items:
+            $ref: '#/components/schemas/SecretChange'
+    DeleteApplicationInput:
+      type: object
+      additionalProperties: false
+      required: [confirmName]
+      properties:
+        confirmName:
+          type: string
+          description: The application's current name, typed by the caller to confirm a destructive deletion.
+    OperationKind:
+      type: string
+      enum: [deploy, teardown]
+      description: A deploy converges the application; a teardown deletes it and everything it owns.
+    TeardownStep:
+      type: string
+      enum: [delete-workload, delete-database, delete-key-value, delete-bucket, delete-secrets, delete-identity, delete-image-repository, delete-records]
+      description: One ordered teardown step. Steps before the current step in plannedSteps are complete.
+    SubmitDeploymentInput:
+      type: object
+      additionalProperties: false
+      required: [applicationRevision]
+      properties:
+        applicationRevision:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Exact current application revision to snapshot; stale revisions return 409.
+    DeploymentAccepted:
+      type: object
+      additionalProperties: false
+      required: [deploymentId, applicationId, state, statusUrl, pollAfterMs]
+      properties:
+        deploymentId:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/DeploymentState'
+        statusUrl:
+          type: string
+          format: uri-reference
+          description: Durable /api/v1/deployments/{deploymentId} status location.
+        pollAfterMs:
+          type: integer
+          const: 2000
+    DeploymentView:
+      type: object
+      additionalProperties: false
+      required: [id, applicationId, applicationRevision, targetId, execution, requestedSourceRef, operation, plannedSteps, attempt, state, terminal, message, partialResources, addresses, pollAfterMs, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        applicationId:
+          type: string
+          format: uuid
+        applicationRevision:
+          type: integer
+          format: int64
+          minimum: 1
+        targetId:
+          type: string
+        execution:
+          $ref: '#/components/schemas/ExecutionMode'
+        requestedSourceRef:
+          type: string
+          description: Immutable requested ref; empty means the default branch was requested.
+        resolvedCommit:
+          type: string
+          description: Full resolved commit recorded before cloud mutation, once source preparation succeeds.
+        operation:
+          $ref: '#/components/schemas/OperationKind'
+        plannedSteps:
+          type: array
+          items:
+            $ref: '#/components/schemas/TeardownStep'
+          description: For a teardown, the ordered steps it will run for this application's resources. Empty for a deploy.
+        attempt:
+          type: integer
+          minimum: 1
+          description: Which automatic attempt this is. A teardown whose worker stopped is requeued and counts up.
+        state:
+          $ref: '#/components/schemas/DeploymentState'
+        terminal:
+          type: boolean
+          description: True exactly for succeeded, failed, or interrupted; stop polling when true.
+        step:
+          type: string
+          description: Module-authored stable current/uncertain step; not arbitrary provider text.
+        progress:
+          type: string
+          description: Coalesced, bounded safe progress snapshot, not raw logs.
+        errorCode:
+          type: string
+          description: Safe failure classification when available.
+        message:
+          type: string
+          description: Safe status/failure explanation; scheduled success means schedule installed.
+        partialResources:
+          type: array
+          items:
+            type: string
+          description: Safe summaries of retained partial resources, not credentials, raw artifacts, or IAM references.
+        addresses:
+          type: array
+          items:
+            type: string
+          description: Safe provider-reported application addresses.
+        pollAfterMs:
+          type: integer
+          minimum: 0
+          description: Polling interval in milliseconds; 2000 while observing nonterminal work. Stop polling when terminal is true.
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        stepStartedAt:
+          type: string
+          format: date-time
+          description: When the current step began, so a client can tell a slow step from a stalled one.
+        finishedAt:
+          type: string
+          format: date-time
+        resolutionReason:
+          type: string
+          description: Recorded admin acknowledgement reason; the operation remains interrupted.
+    CategoryView:
+      type: object
+      additionalProperties: false
+      required: [key, label, description]
+      properties:
+        key:
+          type: string
+          description: Stable value stored in ApplicationInput.category.
+        label:
+          type: string
+        description:
+          type: string
+    TargetView:
+      type: object
+      additionalProperties: false
+      required: [id, label, ready, executionModes, resourceSizes, maxReplicas, publicExposure, internalExposure, repositories, databaseKinds, bucketKinds]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        ready:
+          type: boolean
+          description: Worker descriptor is fresh and matches the API target configuration hash.
+        executionModes:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ExecutionMode'
+        resourceSizes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResourceInput'
+        maxReplicas:
+          type: integer
+          minimum: 1
+        publicExposure:
+          type: boolean
+        internalExposure:
+          type: boolean
+          description: Private services get an address on the internal ingress.
+        repositories:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: Optional extra allowlist of exact source URLs, without credentials. Empty means the Workspace GitHub App installation is the allowlist.
+        repositorySuggestions:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: Repositories synced from GitHub App installations, for the deploy form when repositories is empty. Not an allowlist; a pasted URL is still checked against the installation account. Omitted when the operator list is in effect.
+        databaseKinds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/DatabaseKind'
+        bucketKinds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/BucketKind'
+    DetectionInput:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Canonical repository URL. When the target lists repositories, the URL must be one of them; otherwise it must belong to a synced GitHub App installation.
+        ref:
+          type: string
+          description: Branch, tag, or commit to scan; empty resolves the repository's default branch.
+    DetectionState:
+      type: string
+      enum: [queued, succeeded, failed]
+      description: |
+        There is no running state between queued and terminal: a scan changes
+        no application, deployment, or cloud resource, so nothing here needs a
+        heartbeat or an interrupted/uncertain outcome the way a deployment
+        does.
+    DetectionAccepted:
+      type: object
+      additionalProperties: false
+      required: [detectionId, state, statusUrl, pollAfterMs]
+      properties:
+        detectionId:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/DetectionState'
+        statusUrl:
+          type: string
+          format: uri-reference
+          description: Durable /api/v1/detections/{detectionId} status location.
+        pollAfterMs:
+          type: integer
+          minimum: 0
+    DetectionView:
+      type: object
+      additionalProperties: false
+      required: [id, targetId, url, ref, state, terminal, pollAfterMs, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        targetId:
+          type: string
+        url:
+          type: string
+          format: uri
+        ref:
+          type: string
+        state:
+          $ref: '#/components/schemas/DetectionState'
+        terminal:
+          type: boolean
+          description: True exactly for succeeded or failed; stop polling when true.
+        result:
+          $ref: '#/components/schemas/DetectResult'
+        message:
+          type: string
+          description: Safe failure explanation, present only when state is failed.
+        pollAfterMs:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    DetectResult:
+      type: object
+      additionalProperties: false
+      description: Entirely advisory; an absent or empty field means "nothing detected," not a failure. A caller falls back to its own defaults.
+      properties:
+        dockerfilePath:
+          type: string
+          description: Best-guess Dockerfile, repository-relative; absent if none was found.
+        suggestedPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: First numeric EXPOSE port in the chosen Dockerfile; absent or 0 if none was found.
+        dockerfileCandidates:
+          type: array
+          items:
+            type: string
+          description: Every Dockerfile-like path found, ordered best-first.
+        dockerfilePorts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 65535
+          description: Maps each candidate Dockerfile path to its first EXPOSE port, for re-evaluating the suggestion if the requester overrides the chosen Dockerfile.
+        composePreview:
+          $ref: '#/components/schemas/ComposePreview'
+        suggestedDatabase:
+          type: string
+          enum: [postgres, dynamodb]
+          description: Best-effort managed database guess; absent when nothing confident was found.
+        databaseReason:
+          type: string
+          description: Short human-readable explanation of suggestedDatabase, e.g. `found "pg" in package.json`.
+    ComposePreview:
+      type: object
+      additionalProperties: false
+      required: [path, services]
+      description: Non-binding summary of a docker-compose file; informational only.
+      properties:
+        path:
+          type: string
+          description: Repository-relative path of the compose file parsed.
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComposeService'
+    ComposeService:
+      type: object
+      additionalProperties: false
+      required: [name, hasBuild]
+      properties:
+        name:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        hasBuild:
+          type: boolean
+        image:
+          type: string
+    GitHubAppConfigInput:
+      type: object
+      additionalProperties: false
+      required: [appId, privateKey]
+      properties:
+        appId:
+          type: integer
+          format: int64
+          minimum: 1
+        apiBaseUrl:
+          type: string
+          description: Overrides the API root for GitHub Enterprise Server. Empty means github.com.
+        privateKey:
+          type: string
+          description: 'PEM-encoded RSA private key; the exact string "MASKED:****" keeps the current key, and an empty string clears it.'
+    GitHubAppManifestInput:
+      type: object
+      additionalProperties: false
+      properties:
+        organization:
+          type: string
+          description: Create the App under this organization instead of the administrator's personal account. Empty means personal account.
+    GitHubAppManifestStart:
+      type: object
+      additionalProperties: false
+      required: [manifestJson, state, createUrl]
+      properties:
+        manifestJson:
+          type: string
+          description: The GitHub App Manifest JSON document. Submit it as the "manifest" field of a form POST to createUrl.
+        state:
+          type: string
+          description: Append as createUrl's own "state" query parameter. GitHub echoes it back on the redirect it issues once an administrator confirms creating the App.
+        createUrl:
+          type: string
+          format: uri
+          description: Where to POST the manifest form -- github.com/settings/apps/new, or an organization's equivalent.
+    GitHubAppStatusView:
+      type: object
+      additionalProperties: false
+      required: [available, configured, privateKeyConfigured, installations]
+      properties:
+        available:
+          type: boolean
+          description: False when this deployment has not configured GitHubAppAdmin at all; every other field is then zero.
+        configured:
+          type: boolean
+          description: True once both an App ID and a private key are set.
+        appId:
+          type: integer
+          format: int64
+        apiBaseUrl:
+          type: string
+        privateKeyConfigured:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          description: The administrator user ID that last changed this configuration.
+        installations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GitHubInstallationView'
+    GitHubInstallationView:
+      type: object
+      additionalProperties: false
+      required: [id, accountLogin, accountType, repositorySelection, permissions, syncedAt]
+      properties:
+        id:
+          type: string
+          description: The GitHub installation ID, rendered as decimal.
+        accountLogin:
+          type: string
+        accountType:
+          type: string
+          enum: [Organization, User]
+        repositorySelection:
+          type: string
+          enum: [all, selected]
+        permissions:
+          type: object
+          additionalProperties:
+            type: string
+        htmlUrl:
+          type: string
+          format: uri
+        suspendedAt:
+          type: string
+          format: date-time
+        syncedAt:
+          type: string
+          format: date-time
+          description: When the worker last confirmed this installation from GitHub. Evidence of freshness, not a guarantee of it.
+    DirectoryEntitlementView:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, bindable, syncedAt]
+      properties:
+        id:
+          type: string
+          description: The directory's own identifier for this entitlement.
+        displayName:
+          type: string
+        description:
+          type: string
+        appId:
+          type: string
+          description: The directory's identifier for the application or resource this entitlement grants access to. Empty for a directory-wide group.
+        bindable:
+          type: boolean
+          description: Whether the directory's own automation can grant this entitlement programmatically, as opposed to directory-synced membership only.
+        syncedAt:
+          type: string
+          format: date-time
+          description: When the worker last confirmed this entitlement from the directory. Evidence of freshness, not a guarantee of it.
+    RoleMappingInput:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [member, app-owner, admin, vuln-admin]
+    RoleMappingView:
+      type: object
+      additionalProperties: false
+      required: [entitlementId, role, updatedAt, updatedBy]
+      properties:
+        entitlementId:
+          type: string
+          description: The directory entitlement ID this mapping covers (DirectoryEntitlementView.id).
+        displayName:
+          type: string
+          description: The entitlement's synced display name, when still available. Absent if the directory stopped syncing it.
+        role:
+          type: string
+          enum: [member, app-owner, admin, vuln-admin]
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          description: The administrator's user ID.
+    MemberView:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, avatar, role, vulnAdmin, disabled, createdAt, lastSeenAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        name:
+          type: string
+        avatar:
+          type: string
+          description: Profile avatar URL, or empty if unavailable.
+        role:
+          type: string
+          enum: [member, app-owner, admin]
+          description: Resolved live from currently held directory entitlements, the same computation UserView.role applies at sign-in. Not a field stored on the user.
+        vulnAdmin:
+          type: boolean
+          description: Cross-application vulnerability finding visibility, independent of role. Always true when role is admin.
+        disabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+          description: This user's record's last write, which happens on every successful sign-in. An approximation of "last active", not a dedicated login-audit timestamp.
+    FeatureFlagInput:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [off, on, group]
+        groupEntitlementIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+          description: Required when mode is "group"; ignored otherwise. Directory entitlement IDs (DirectoryEntitlementView.id). An identity holding any of these sees the feature.
+    FeatureFlagGroupView:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: Directory entitlement ID (DirectoryEntitlementView.id).
+        displayName:
+          type: string
+          description: The entitlement's synced display name, when still available.
+    FeatureFlagView:
+      type: object
+      additionalProperties: false
+      required: [key, mode]
+      properties:
+        key:
+          type: string
+          description: The flag's key, one of a fixed set this deployment of AppHub understands.
+        mode:
+          type: string
+          enum: [off, on, group]
+        groups:
+          type: array
+          description: Gating directory entitlements when mode is "group". Empty otherwise. An identity holding any of these sees the feature.
+          items:
+            $ref: '#/components/schemas/FeatureFlagGroupView'
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          description: The administrator's user ID. Absent for a key with no configured record (mode defaults to "off").
+    LogEvent:
+      type: object
+      additionalProperties: false
+      required: [timestamp, message, logStreamName]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        logStreamName:
+          type: string
+    LogResult:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEvent'
+        nextToken:
+          type: string
+    ResolveInterruptedInput:
+      type: object
+      additionalProperties: false
+      required: [workerStopped, reason]
+      properties:
+        workerStopped:
+          type: boolean
+          const: true
+          description: Operator acknowledgement that the old worker and build container have been stopped.
+        reason:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Nonblank explanation recorded with the resolution; do not include credentials.
+    ApplicationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicationView'
+        cursor:
+          type: string
+          description: Opaque continuation; omitted when exhausted.
+    DeploymentPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeploymentView'
+        cursor:
+          type: string
+          description: Opaque continuation; omitted when exhausted.
+    AuthProviderView:
+      type: object
+      additionalProperties: false
+      required: [id, label, kind, loginUrl]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [google, oidc]
+        loginUrl:
+          type: string
+          format: uri-reference
+          description: Same-origin /auth/{id}/login URL.
+    ProvidersResponse:
+      type: object
+      additionalProperties: false
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthProviderView'
+    IdentityView:
+      type: object
+      additionalProperties: false
+      required: [providerId, issuer, subject, email]
+      description: The exact external identity that established this session or OAuth family; equal emails never link identities.
+      properties:
+        providerId:
+          type: string
+        issuer:
+          type: string
+          format: uri
+        subject:
+          type: string
+          minLength: 1
+        email:
+          type: string
+    UserView:
+      type: object
+      additionalProperties: false
+      required: [id, email, name, avatar, role, vulnAdmin, enabledFeatures, permittedActions, identity]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        name:
+          type: string
+        avatar:
+          type: string
+          description: Profile avatar URL, or empty if unavailable.
+        role:
+          type: string
+          enum: [member, app-owner, admin]
+          description: |
+            Resolved from auth.admins (legacy, always admin) or, if
+            configured, an admin-mapped directory entitlement the identity
+            currently holds; member is the default absent either.
+        vulnAdmin:
+          type: boolean
+          description: Cross-application vulnerability finding visibility, independent of role. Always true when role is admin.
+        enabledFeatures:
+          type: array
+          items:
+            type: string
+          description: Feature-flag keys currently enabled for this identity. A key absent here is not merely hidden in the UI -- nothing behind it should be reachable, including by URL.
+        permittedActions:
+          type: array
+          items:
+            type: string
+        csrfToken:
+          type: string
+          description: Cookie caller's session-bound CSRF token; omitted for bearer callers. Never persist in localStorage.
+        identity:
+          $ref: '#/components/schemas/IdentityView'
+    SessionView:
+      type: object
+      additionalProperties: false
+      required: [id, kind, identity, current, revoked, createdAt, expiresAt]
+      properties:
+        id:
+          type: string
+          description: Nonsecret display ID used for revocation; never a bearer secret or token/session hash.
+        kind:
+          type: string
+          enum: [browser, oauth]
+        clientId:
+          type: string
+          description: OAuth client ID for a delegated family; omitted for browser sessions.
+        resource:
+          $ref: '#/components/schemas/OAuthResource'
+        scopes:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Scope'
+        identity:
+          $ref: '#/components/schemas/IdentityView'
+        current:
+          type: boolean
+          description: Whether this is the session or family authorizing the current request.
+        revoked:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute browser session or OAuth family expiry; refresh never extends family expiry.
+    SessionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionView'
+        cursor:
+          type: string
+          description: Opaque continuation; omitted when exhausted.
+    ConsentView:
+      type: object
+      additionalProperties: false
+      required: [transactionId, clientId, redirectUri, resource, scopes, identity, expiresAt]
+      properties:
+        transactionId:
+          type: string
+        clientId:
+          type: string
+        redirectUri:
+          type: string
+          format: uri
+        resource:
+          $ref: '#/components/schemas/OAuthResource'
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ConsentScope'
+        identity:
+          $ref: '#/components/schemas/IdentityView'
+        expiresAt:
+          type: string
+          format: date-time
+    ConsentDecisionInput:
+      type: object
+      additionalProperties: false
+      required: [transactionId, action]
+      properties:
+        transactionId:
+          type: string
+          minLength: 1
+        action:
+          type: string
+          enum: [approve, deny]
+    ConsentDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [redirectUrl]
+      properties:
+        redirectUrl:
+          type: string
+          format: uri
+          description: Exact transaction-bound callback plus code or error, correlated state, and issuer; explicitly navigate the browser to this URL.
+    Scope:
+      type: string
+      enum: ['applications:read', 'applications:write', 'deployments:read', 'deployments:write']
+    ConsentScope:
+      type: string
+      enum: ['applications:read', 'applications:write', 'deployments:read', 'deployments:write', 'app:access']
+      description: A management scope or the hosted-application MCP access scope.
+    ScopeString:
+      type: string
+      minLength: 1
+      pattern: '^(applications:read|applications:write|deployments:read|deployments:write)( (applications:read|applications:write|deployments:read|deployments:write))*$'
+      description: Nonempty space-delimited set of exact supported scopes; unknown scopes are rejected.
+    OAuthResource:
+      type: string
+      format: uri
+      description: Exactly {publicOrigin}/api, {publicOrigin}/mcp, or an enabled hosted application's https://{applicationHost}/mcp audience; one resource per token/family, never a prefix.
+    AuthorizationServerMetadata:
+      type: object
+      required: [issuer, authorization_endpoint, token_endpoint, revocation_endpoint, response_types_supported, grant_types_supported, code_challenge_methods_supported, token_endpoint_auth_methods_supported, scopes_supported, authorization_response_iss_parameter_supported]
+      properties:
+        issuer:
+          type: string
+          format: uri
+          description: Exactly configured publicOrigin, independent of request headers.
+        authorization_endpoint:
+          type: string
+          format: uri
+        token_endpoint:
+          type: string
+          format: uri
+        revocation_endpoint:
+          type: string
+          format: uri
+        response_types_supported:
+          type: array
+          items:
+            type: string
+            const: code
+          const: [code]
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+            enum: [authorization_code, refresh_token]
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+        code_challenge_methods_supported:
+          type: array
+          items:
+            type: string
+            const: S256
+          const: [S256]
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+            const: none
+          const: [none]
+        revocation_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+            const: none
+          const: [none]
+        scopes_supported:
+          type: array
+          minItems: 4
+          maxItems: 4
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Scope'
+        authorization_response_iss_parameter_supported:
+          type: boolean
+          const: true
+        client_id_metadata_document_supported:
+          type: boolean
+          const: true
+    ProtectedResourceMetadata:
+      type: object
+      required: [resource, authorization_servers, scopes_supported, bearer_methods_supported]
+      properties:
+        resource:
+          $ref: '#/components/schemas/OAuthResource'
+        authorization_servers:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: string
+            format: uri
+          description: Exactly one entry, the configured publicOrigin issuer.
+        scopes_supported:
+          type: array
+          minItems: 4
+          maxItems: 4
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Scope'
+        bearer_methods_supported:
+          type: array
+          items:
+            type: string
+            const: header
+          const: [header]
+    AuthorizationCodeExchange:
+      type: object
+      additionalProperties: false
+      required: [grant_type, code, client_id, redirect_uri, resource, code_verifier]
+      properties:
+        grant_type:
+          type: string
+          const: authorization_code
+        code:
+          type: string
+          minLength: 1
+          description: Single-use code; expires five minutes after approval.
+        client_id:
+          type: string
+          minLength: 1
+        redirect_uri:
+          type: string
+          format: uri
+          description: Exact redirect_uri bound at authorization.
+        resource:
+          $ref: '#/components/schemas/OAuthResource'
+        code_verifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._~-]{43,128}$'
+    RefreshTokenExchange:
+      type: object
+      additionalProperties: false
+      required: [grant_type, refresh_token, client_id, resource]
+      properties:
+        grant_type:
+          type: string
+          const: refresh_token
+        refresh_token:
+          type: string
+          minLength: 1
+          description: Current unconsumed refresh token; replay revokes the family.
+        client_id:
+          type: string
+          minLength: 1
+        resource:
+          $ref: '#/components/schemas/OAuthResource'
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_in, refresh_token, scope]
+      properties:
+        access_token:
+          type: string
+          description: Opaque AppHub access token; never an upstream token or JWT.
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          minimum: 1
+          maximum: 900
+          description: Remaining access token lifetime in seconds, bounded by absolute family expiry.
+        refresh_token:
+          type: string
+          description: Newly issued single-use refresh token; replace prior credentials atomically.
+        scope:
+          $ref: '#/components/schemas/ScopeString'
+    RevokeTokenInput:
+      type: object
+      additionalProperties: false
+      required: [token, client_id]
+      properties:
+        token:
+          type: string
+          minLength: 1
+        client_id:
+          type: string
+          minLength: 1
+        token_type_hint:
+          type: string
+          enum: [access_token, refresh_token]
+    OAuthError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Standard OAuth error such as invalid_request, invalid_client, invalid_grant, invalid_scope, unsupported_grant_type, access_denied, server_error, or temporarily_unavailable.
+        error_description:
+          type: string
+          description: Optional safe explanation; never codes, tokens, provider bodies, or internal causes.
+        error_uri:
+          type: string
+          format: uri

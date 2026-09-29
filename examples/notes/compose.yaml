@@ -1,0 +1,15 @@
+# Local development only. AppHub provisions the real table and ignores this file.
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.1
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
+  notes:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      TABLE_NAME: notes
+      LOCAL_DYNAMO_ENDPOINT: http://dynamodb:8000
+      DEV_USER_EMAIL: dev@example.com
+    depends_on:
+      - dynamodb

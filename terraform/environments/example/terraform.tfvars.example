@@ -1,0 +1,120 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored: it
+# names an account, a domain and an identity provider's clients, none of which
+# belong in a public repository.
+#
+# Nothing here is a secret. Client secrets and source private keys are
+# parameters Terraform creates and an operator sets; `terraform output
+# secrets_to_set` lists them after the first apply.
+
+aws_region  = "us-west-2"
+environment = "dev"
+
+# Route53 zone, with the trailing dot. The portal and every application
+# hostname are created inside it.
+hosted_zone_name = "example.com."
+portal_subdomain = "apphub"
+apps_subdomain   = "apps"
+
+# TLS for published applications. alb-wildcard (the default) puts an ACM
+# certificate for *.apps.<zone> on an ALB in front of Traefik — Union
+# Station's shape. strict is NLB passthrough and per-host Let's Encrypt on
+# Traefik; it needs acme_email, and acme_ca_server while bringing it up.
+ingress_tls_mode = "alb-wildcard"
+# acme_email     = "platform-team@example.com"
+# acme_ca_server = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+# Aurora PostgreSQL 18 is available alongside DynamoDB by default. Download the
+# AWS RDS CA bundle for aws_region, then set the absolute local path to that PEM.
+# Terraform publishes the bundle to Parameter Store for the worker's TLS
+# verify-full connection. To omit Aurora entirely, set enable_relational_port
+# to false; rds_ca_pem_file is then not required.
+rds_ca_pem_file = "/absolute/path/to/rds-region-bundle.pem"
+
+# Who may sign in to the portal. Client ids are published to Parameter Store
+# and injected into the API and worker as APPHUB_AUTH_<ID>_CLIENT_ID; client
+# secrets are created empty and set out of band (terraform output secrets_to_set).
+#
+# Register https://apphub.example.com/auth/google/callback with the client
+# below before the first sign-in.
+auth_providers = [
+  {
+    id              = "google"
+    label           = "Google"
+    kind            = "google"
+    client_id       = "<the OAuth client id issued by your provider>"
+    allowed_domains = ["example.com"]
+  },
+]
+
+# Empty on a first apply. Sign in once, read the Subject shown at
+# /settings/sessions, then put it here and apply again. Email is never an
+# administrator identifier.
+auth_admins = [
+  # { provider_id = "google", subject = "1234567890" },
+]
+
+# Who may reach an application published behind the ingress middleware. This is
+# authentication, not authorization: every admitted identity reaches every
+# application behind it.
+oauth2_proxy_email_domains = ["example.com"]
+
+# Optional extra repository allowlist. Empty (the default) means the Workspace
+# GitHub App installation is the allowlist — configure that App in the UI after
+# the stack is up. Uncomment to also restrict deploys to exact URLs:
+# source_repositories = [
+#   {
+#     url  = "https://github.com/example/hello-world"
+#     auth = "public"
+#   },
+#   # A private repository override needs a repository-scoped GitHub App. Only
+#   # contents:read is requested, and the private key is worker-only (injected
+#   # as APPHUB_SOURCE_INTERNAL_SERVICE_PRIVATE_KEY from Parameter Store):
+#   # {
+#   #   url                    = "https://github.com/example/internal-service"
+#   #   auth                   = "githubApp"
+#   #   github_app_id          = 123456
+#   #   github_installation_id = 7890123
+#   #   github_key_basename    = "internal-service.pem"
+#   # },
+# ]
+
+# Optional ConductorOne directory sync. Empty leaves it off. The client secret
+# is a Parameter Store SecureString; terraform output secrets_to_set names it.
+# c1_directory_tenant_url = "https://tenant.conductor.one"
+# c1_directory_client_id  = "directory-client@tenant.conductor.one/pcc"
+
+# Images.
+#
+# server_image and worker_image default to the cluster ECR :latest tags.
+# Rolling a newly pushed image onto ECS is `make promote`, not a terraform
+# apply. builder_image is digest-pinned for the first apply that creates the
+# build families (`make push-builder` writes builder_image.auto.tfvars);
+# later builder pins are `make promote-builder`.
+#
+# builder.Dockerfile pins ghcr.io/osscontainertools/kaniko — the supported
+# Kaniko OSS image, not the archived gcr.io/kaniko-project executor.
+
+# Required: build terraform/plugins/cookiestrip/Dockerfile.traefik, push to an
+# ECR repository the ECS execution role can read, then pin its published
+# digest. Stock Traefik does not contain the cookie-stripping middleware.
+traefik_image = "<account>.dkr.ecr.<region>.amazonaws.com/apphub-traefik@sha256:<digest>"
+
+# If enabling the optional Lambda function port, explicitly approve runtimes.
+# enable_function_port = true
+# function_runtimes    = ["nodejs22.x"]
+
+# Development sizing. One NAT gateway is one availability zone away from taking
+# private egress with it; match availability_zone_count for production.
+nat_gateway_count      = 1
+api_desired_count      = 1
+point_in_time_recovery = false
+deletion_protection    = false
+
+# Concurrent builds. Each gets its own task definition, EFS filesystem,
+# access point, and isolated NFS security group. Keep
+# worker_max_concurrent_deployments at or below it, or builds queue.
+build_slots                       = 2
+worker_max_concurrent_deployments = 2

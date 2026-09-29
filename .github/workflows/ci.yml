@@ -1,0 +1,286 @@
+# AppHub CI.
+#
+# Two properties this workflow exists to hold, both of which matter more once
+# the repository is public:
+#
+#  1. **It is credential-free.** No job references the secrets context, no job
+#     requests `id-token: write`, and the test job runs with the cloud
+#     credential variables explicitly blanked and instance metadata disabled --
+#     so a test that quietly depends on ambient credentials fails here rather
+#     than passing on the one laptop that has them. `make hermetic` asserts the
+#     first two mechanically, because a property nothing checks is a property
+#     that lasts until the next pull request.
+#
+#  2. **It is the Makefile.** Every step below is a `make` target you can run
+#     yourself, at the same pinned tool versions. Nothing is reimplemented here,
+#     so "green in CI" and "green locally" cannot drift apart.
+#
+# Third-party actions are pinned to full commit SHAs. A tag is a mutable pointer
+# and this workflow runs on pull requests.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Default to nothing; each job asks for exactly what it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fetch modules only through the proxy, and fail if it cannot serve one.
+  # The usual `,direct` fallback is deliberately absent: it would let a build
+  # fetch straight from a version-control host the proxy never saw, which is a
+  # different supply chain from the one the checksum database attests to.
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  # Left at the default (auto) deliberately. go.mod pins the toolchain that
+  # builds AppHub; the pinned dev tools are separate module graphs and one of
+  # their dependencies may legitimately need a newer toolchain than ours.
+  # Forbidding that would turn a linter's dependency bump into a red build here.
+
+jobs:
+  build-test:
+    name: build / vet / test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # go.mod names the toolchain and the Makefile pins GOTOOLCHAIN to the same
+      # line, so CI and a local `make` cannot analyse different standard
+      # libraries. See docs/decisions/ on the Go floor.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      - name: Build
+        run: make build
+
+      - name: Vet
+        run: make vet
+
+      # The suite must pass with no cloud credentials of any kind, so the job
+      # takes them away rather than merely not providing them: blank the SDK's
+      # environment variables, point its config files at nowhere, and switch off
+      # instance metadata. A test that needs AWS should use compute/fake.
+      - name: Test
+        env:
+          CI: "true"
+          AWS_ACCESS_KEY_ID: ""
+          AWS_SECRET_ACCESS_KEY: ""
+          AWS_SESSION_TOKEN: ""
+          AWS_PROFILE: ""
+          AWS_REGION: ""
+          AWS_DEFAULT_REGION: ""
+          AWS_CONFIG_FILE: /dev/null
+          AWS_SHARED_CREDENTIALS_FILE: /dev/null
+          AWS_EC2_METADATA_DISABLED: "true"
+          AWS_EC2_METADATA_SERVICE_ENDPOINT: http://169.254.169.254.invalid/
+        run: make test
+
+  dco:
+    name: DCO sign-off
+    # Only a pull request has a base to diff against; a push to main is
+    # whatever the pull request already certified.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Full history, because the check walks every commit in the branch rather
+      # than looking at the tip.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # CONTRIBUTING.md requires a sign-off on every commit; until this job
+      # existed, requiring it and a reviewer noticing were the same thing.
+      # Event data goes through the environment, never into the shell command.
+      #
+      # The base is resolved by *name* against the remote rather than taken from
+      # the event's base.sha. That field is a snapshot from when the webhook
+      # fired: retargeting a pull request, or the base branch simply moving,
+      # leaves it pointing at a commit the head was never built on, and the
+      # resulting range enumerates commits that landed on trunk long ago. That
+      # is not hypothetical -- it produced a spurious failure on PR #6 after it
+      # was retargeted to main (docs/decisions/, USOSS-18).
+      - name: Every commit is signed off by its author
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        #
+        # origin/$BASE_REF, not a fresh fetch: the checkout above sets
+        # persist-credentials: false, so anything touching the network here
+        # would be unauthenticated. fetch-depth: 0 has already fetched every
+        # branch, so the ref is on disk and no credentials are needed.
+        run: ./hack/check-dco.sh "origin/$BASE_REF" "$HEAD_SHA"
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # go.mod names the toolchain and the Makefile pins GOTOOLCHAIN to the same
+      # line, so CI and a local `make` cannot analyse different standard
+      # libraries. See docs/decisions/ on the Go floor.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      # golangci-lint is installed by the Makefile at a version pinned there, so
+      # there is exactly one place to bump it and local runs match this one.
+      #
+      # USOSS-72: an intermittent, never-explained sighting had golangci-lint
+      # exit 2 ("linters did not run") while still printing "0 issues" -- so a
+      # single green here is a plausible pass, not a verified one. Two
+      # independent runs that both have to succeed are a check; running it
+      # once and hoping is not. hack/lint.sh (invoked by `make lint`) already
+      # turns a non-0/1 exit into a loud failure with the transcript attached,
+      # so a genuine USOSS-72 recurrence fails here with evidence instead of
+      # silently vanishing into a retry.
+      - name: Lint (run 1 of 2)
+        run: make lint
+
+      - name: Lint (run 2 of 2)
+        run: make lint
+
+  gates:
+    name: boundaries / headers / hermetic / decisions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # go.mod names the toolchain and the Makefile pins GOTOOLCHAIN to the same
+      # line, so CI and a local `make` cannot analyse different standard
+      # libraries. See docs/decisions/ on the Go floor.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      # ConductorOne stays optional and DynamoDB stays fenced. Both are proved
+      # over a union import graph that ignores build constraints, so no platform,
+      # tag, or architecture can hide an import from them (docs/decisions/,
+      # USOSS-28). The rules are inert while the packages they name are empty and
+      # become load-bearing the moment a real import lands -- which is the point
+      # of installing them now rather than after fifteen ports have gone by.
+      - name: Import boundaries
+        run: make boundary
+
+      - name: License headers
+        run: make headers
+
+      - name: CI needs no credentials
+        run: make hermetic
+
+      # The decision record is merged with `union` so that concurrent appends do
+      # not conflict. Union works a line at a time, so it can drop the separator
+      # block that introduces an entry, or splice a heading onto the previous
+      # line, and report no conflict either way -- which it has now done on two
+      # pull requests. The check asserts the file's shape, because that is the
+      # part a content or line-count check structurally cannot see.
+      - name: Decision record structure
+        run: make decisions
+
+      # hack/oss-sync.sh runs this before publishing and refuses on a finding,
+      # so a finding caught only there is caught at the last possible moment.
+      - name: Publication disclosures
+        run: make disclosure
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Full history: this repository is going public, and publishing history
+      # publishes every secret that was ever committed to it, not just the ones
+      # still in the tree.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # go.mod names the toolchain and the Makefile pins GOTOOLCHAIN to the same
+      # line, so CI and a local `make` cannot analyse different standard
+      # libraries. See docs/decisions/ on the Go floor.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      # gitleaks is installed from source at a pinned version by the Makefile.
+      # The maintained action requires an organisation licence key, which would
+      # mean wiring a secret into a workflow whose whole premise is not having
+      # any.
+      - name: gitleaks
+        run: make secrets
+
+  supply-chain:
+    name: vulnerabilities / licenses
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # go.mod names the toolchain and the Makefile pins GOTOOLCHAIN to the same
+      # line, so CI and a local `make` cannot analyse different standard
+      # libraries. See docs/decisions/ on the Go floor.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.mod
+            go.sum
+
+      - name: govulncheck
+        run: make vuln
+
+      # Fails on any dependency licence outside Apache-2.0 / MIT / BSD / ISC.
+      # AppHub is Apache-2.0; a copyleft dependency arriving unnoticed is a
+      # licensing problem discovered at the worst possible moment.
+      - name: Dependency licenses
+        run: make licenses

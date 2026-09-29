@@ -1,0 +1,7 @@
+# Passing secrets to a reusable workflow needs no expression at all.
+name: caller
+on: [push]
+jobs:
+  call:
+    uses: ./.github/workflows/other.yml
+    secrets: inherit

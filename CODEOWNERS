@@ -1,0 +1,30 @@
+# Every change gets a review from a maintainer. AppHub is a credential-vending
+# project heading for public release, so there is no path that merges without
+# one.
+#
+# Ownership is a team, not a person: a review path through one individual is a
+# bus factor of one, and a public repository should not advertise whose inbox to
+# aim at.
+#
+# NOTE: CODEOWNERS binds only when the named team exists and has write access to
+# this repository, and it is enforced only when branch protection requires
+# code-owner review. The team has write access to the public repository; the
+# private development repository sits in another organization, where it does
+# not bind. Code-owner review is not required anywhere yet -- see
+# docs/decisions/, "CI is a floor, not a gate, until branch protection is
+# enabled".
+*                       @conductorone/apphub-maintainers
+
+# The gates themselves. A change that weakens CI, an import boundary, the
+# disclosure rules, or the licence terms should be harder to land than a change
+# those gates are protecting.
+/.github/               @conductorone/apphub-maintainers
+/.gitleaks.toml         @conductorone/apphub-maintainers
+/Makefile               @conductorone/apphub-maintainers
+/hack/                  @conductorone/apphub-maintainers
+/internal/boundary/     @conductorone/apphub-maintainers
+/internal/hermetic/     @conductorone/apphub-maintainers
+/LICENSE                @conductorone/apphub-maintainers
+/NOTICE                 @conductorone/apphub-maintainers
+/SECURITY.md            @conductorone/apphub-maintainers
+/docs/decisions/        @conductorone/apphub-maintainers

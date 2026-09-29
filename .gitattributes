@@ -1,0 +1,40 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# There is nothing here, and the reason is worth keeping.
+#
+# docs/DECISIONS.md was one append-only file carrying every settled decision,
+# and it was set `merge=union` so that concurrent appends were not a conflict.
+# The reasoning was sound as far as it went:
+#
+#   The decision record is append-only, so concurrent appends are not a
+#   conflict. Every pull request that settles something adds an entry at the
+#   end of this file. Without a merge driver, the first one to merge puts every
+#   other open branch into conflict on it -- three at the time this was added
+#   (#4, #5, #7), none of which disagreed about anything. `union` keeps both
+#   sides instead of asking, which is the right answer for a log that only ever
+#   grows.
+#
+# It named its own failure mode and its own remedy, and both arrived:
+#
+#   When it stops being right: `union` turns an in-place edit into silent
+#   duplication rather than a conflict. [...] If entries ever do start being
+#   edited in place, the answer is one file per decision
+#   (docs/decisions/USOSS-N.md), where separate files cannot conflict at all --
+#   a migration, not a merge attribute.
+#
+# What it did not anticipate is that the attribute never worked where it
+# mattered. A merge driver is a property of the local git configuration.
+# GitHub's mergeability computation does not honour .gitattributes merge
+# drivers, so `git merge-tree --write-tree origin/main origin/<branch>` exited 0
+# with no conflicts for #5, #19, #26 and #27 while GitHub reported all four
+# CONFLICTING -- over docs/DECISIONS.md, the only file main had touched since
+# those branches diverged. And a CONFLICTING pull request gets no CI at all,
+# because `pull_request` workflows need a refs/pull/N/merge that cannot be
+# built. Thirteen open pull requests, seven-plus of them conflicted per merge,
+# all of them displaying a stale green tick.
+#
+# So the migration happened, for a different reason than the one predicted. The
+# record is now one file per decision under docs/decisions/, where separate
+# files cannot conflict -- locally or on GitHub. See that directory's README,
+# internal/decisions for the invariants, and the decision entry recording this.

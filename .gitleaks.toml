@@ -1,0 +1,1393 @@
+# Secret and disclosure scanning for a repository that is going public.
+#
+# The default gitleaks rules look for things that are secret because they are
+# unguessable: keys, tokens, private key material. They found nothing here, and
+# review pointed out why that is not reassuring. The disclosures this project
+# actually has to avoid are not high-entropy at all:
+#
+#   * An AWS account ID is twelve digits. There is no entropy threshold that
+#     separates one from a timestamp, so no generic scanner will ever flag it.
+#     The source repository being ported from contains real ones.
+#   * An internal hostname is just a hostname. The source repository contains
+#     one of those too, in the deploy path.
+#
+# So this file adds rules for the *shape* of the disclosure rather than for any
+# particular value. Deliberately so: writing the real account IDs into a
+# denylist would publish them in the ruleset, which is the thing being
+# prevented.
+#
+# `make secrets` runs these over the working tree and the full git history.
+# `make secrets-selftest` plants a synthetic example of each class and fails if
+# any rule stops firing.
+
+[extend]
+useDefault = true
+
+# The default rule set does not catch an AWS access key assigned to the
+# identifier AWS itself uses for it. Verified against the pinned version:
+# `api_key = "AKIA..."` is reported and `aws_access_key_id = "AKIA..."` is not,
+# because the generic rule allowlists that identifier as a configuration name.
+# The key prefix is unambiguous on its own, so match it and ignore the context.
+[[rules]]
+id = "apphub-aws-access-key-id"
+description = "AWS access key ID"
+regex = '''\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b'''
+tags = ["secret", "aws"]
+
+# Review found the assignment rule missing a JSON account-id-shaped value: valid
+# JSON where the closing quote sits between the key and the colon. That
+# is one of the two most ordinary ways an account ID travels, so patching the
+# regex to accept a quote would have been fixing the example rather than the
+# class.
+#
+# So this rule takes the same posture as the hostname rule below: every
+# standalone twelve-digit number is a finding, and legitimate ones are
+# allowlisted deliberately. Twelve digits bounded by non-digits is a narrow
+# enough shape that the noise is manageable -- a thirteen-digit millisecond
+# timestamp does not match, because the boundary assertion fails against the
+# digit on either side.
+#
+# The rules below it are kept even though this one subsumes them: they name what
+# was found, and "an AWS account ID in an ARN" is a more useful thing to read at
+# 2am than "a twelve-digit number".
+[[rules]]
+id = "apphub-twelve-digit-identifier"
+description = "standalone twelve-digit number, the shape of an AWS account ID"
+regex = '''\b[0-9]{12}\b'''
+tags = ["disclosure", "aws", "account-id"]
+
+  [[rules.allowlists]]
+  description = "legitimate twelve-digit numbers, if this repository ever has one"
+  condition = "AND"
+  paths = ['''(?:^|/)store/cmd/devseed/application\.go$''']
+  regexTarget = "match"
+  regexes = [
+    # AWS's own documentation example account ID (used throughout AWS's docs
+    # for ARNs and IAM examples), reused here as devseed demo fixture data.
+    # Scoped to this one file: an entry here is a claim that a specific
+    # twelve-digit number is not an account ID, and should be justified in
+    # the pull request that adds it.
+    '''^123456789012$''',
+  ]
+
+[[rules]]
+id = "apphub-aws-account-id-in-arn"
+description = "AWS account ID in an ARN"
+regex = '''arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}:'''
+tags = ["disclosure", "aws", "account-id"]
+
+[[rules]]
+id = "apphub-aws-account-id-assignment"
+description = "AWS account ID assigned to an account-shaped name"
+regex = '''(?i)\b(?:aws[_-]?)?(?:account|owner)[_-]?id\b\s*[:=]+\s*["']?([0-9]{12})\b'''
+tags = ["disclosure", "aws", "account-id"]
+
+[[rules]]
+id = "apphub-aws-ecr-registry-host"
+description = "ECR registry hostname, which embeds the AWS account ID"
+regex = '''\b[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com'''
+tags = ["disclosure", "aws", "account-id"]
+
+  [[rules.allowlists]]
+  description = "the demo ECR registry host, built from AWS's documentation example account ID, used as devseed fixture data"
+  condition = "AND"
+  paths = ['''(?:^|/)store/cmd/devseed/application\.go$''']
+  regexTarget = "match"
+  regexes = ['''^123456789012\.dkr\.ecr\.us-east-1\.amazonaws\.com$''']
+
+[[rules]]
+id = "apphub-aws-infrastructure-identifier"
+description = "AWS infrastructure identifier (VPC, subnet, security group, AMI, instance, ...)"
+regex = '''\b(?:vpc|subnet|sg|igw|nat|rtb|acl|eni|vol|snap|ami)-(?:[0-9a-f]{8}|[0-9a-f]{17})\b'''
+tags = ["disclosure", "aws", "infrastructure"]
+
+# Hostnames are handled the way the import boundary is handled: everything is
+# forbidden and the exceptions are a list somebody had to edit on purpose. An
+# internal hostname does not look different from a public one, so the only rule
+# that can catch one is a rule that catches all of them and then names the ones
+# this repository is allowed to mention.
+#
+# The first version of this rule enumerated a short list of top-level domains,
+# which meant it was not actually fail-closed: review walked a synthetic
+# internal URL through it under `.co`. Enumerating suffixes is the same mistake
+# as enumerating build tags -- the space is not ours to bound. So the suffix is
+# now anything alphabetic.
+#
+# That costs precision on two-label names, because `boundary.go` and `ci.yml`
+# are shaped exactly like hostnames. The split below is how the noise is kept
+# down without reintroducing a suffix list:
+#
+#   * three or more labels is treated as a hostname whatever the suffix, since
+#     three-label filenames are rare and internal hostnames are usually deep;
+#   * two labels count only in a URL, an email address, or a value position,
+#     where the token cannot be a filename;
+#   * and in .go source, where every one of those shapes can also be an
+#     expression, the token has to be data as well -- a string literal, a YAML
+#     mapping line, a URL. The Go-scoped rules below do that, and the comment
+#     above them has the argument for why nothing else can.
+#
+# Adding a host to the allowlist is cheap and reviewable. Missing an internal
+# hostname in a public repository is neither.
+#
+# The suffix must be a real registrable one, and that requirement is not the
+# discriminator it was taken for. It arrived because the rule fired on ordinary
+# Go field chains -- `r.reply.body`, `tc.value` -- and `body`, `value`, `field`,
+# `failed` and `reply` are not suffixes anybody can register. It held until the
+# first large port arrived, and then failed on the same class, because `store`,
+# `name`, `now` and `mu` ARE registrable: a mutex reached through a field named
+# `store` reads as a three-label host, 218 times on one pull request.
+#
+# The list is therefore not tightened again. It was never the mistake, and a
+# third fix to a rule that has been wrong twice in the same place guarantees a
+# fourth. It stays as it is, doing the job it was added for in every file type
+# where a dotted token cannot be an expression -- and .go files, where it can
+# be, step aside to the three Go-scoped rules further down, which require the
+# token to be data instead. The comment above those rules has the argument.
+#
+# The list below is every ASCII suffix IANA delegates (data.iana.org/TLD,
+# version 2026081900), plus the private-use ones internal hosts actually take --
+# internal, corp, lan, intranet, local and friends -- which IANA does not
+# delegate and which are precisely what this rule exists to catch. It is the
+# complete set rather than a short one on purpose: a short list was the round-3
+# defect, where a synthetic host under an unlisted suffix walked through.
+#
+# Refresh it from IANA if a new suffix ever matters. The context-anchored rules
+# below -- URLs, and YAML values, including the Go-scoped mapping-line rule --
+# deliberately do NOT require a known suffix, so any host in a URL or a YAML
+# value stays fail-closed whatever it ends in.
+[[rules]]
+id = "apphub-hostname-multilabel"
+description = "three-or-more-label hostname that is not on the allowlist of hosts this repository may reference"
+regex = '''\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}(?:aaa|aarp|abb|abbott|abbvie|abc|able|abogado|abudhabi|ac|academy|accenture|accountant|accountants|aco|actor|ad|ads|adult|ae|aeg|aero|aetna|af|afl|africa|ag|agakhan|agency|ai|aig|airbus|airforce|airtel|akdn|al|alibaba|alipay|allfinanz|allstate|ally|alsace|alstom|am|amazon|americanexpress|americanfamily|amex|amfam|amica|amsterdam|analytics|android|anquan|anz|ao|aol|apartments|app|apple|aq|aquarelle|ar|arab|aramco|archi|army|arpa|art|arte|as|asda|asia|associates|at|athleta|attorney|au|auction|audi|audible|audio|auspost|author|auto|autos|aw|aws|ax|axa|az|azure|ba|baby|baidu|banamex|band|bank|bar|barcelona|barclaycard|barclays|barefoot|bargains|baseball|basketball|bauhaus|bayern|bb|bbc|bbt|bbva|bcg|bcn|bd|be|beats|beauty|beer|berlin|best|bestbuy|bet|bf|bg|bh|bharti|bi|bible|bid|bike|bing|bingo|bio|biz|bj|black|blackfriday|blockbuster|blog|bloomberg|blue|bm|bms|bmw|bn|bnpparibas|bo|boats|boehringer|bofa|bom|bond|boo|book|booking|bosch|bostik|boston|bot|boutique|box|br|bradesco|bridgestone|broadway|broker|brother|brussels|bs|bt|build|builders|business|buy|buzz|bv|bw|by|bz|bzh|ca|cab|cafe|cal|call|calvinklein|cam|camera|camp|canon|capetown|capital|capitalone|car|caravan|cards|care|career|careers|cars|casa|case|cash|casino|cat|catering|catholic|cba|cbn|cbre|cc|cd|center|ceo|cern|cf|cfa|cfd|cg|ch|chanel|channel|charity|chase|chat|cheap|chintai|christmas|chrome|church|ci|cipriani|circle|cisco|citadel|citi|citic|city|ck|cl|claims|cleaning|click|clinic|clinique|clothing|cloud|club|clubmed|cluster|cm|cn|co|coach|codes|coffee|college|cologne|com|commbank|community|company|compare|computer|comsec|condos|construction|consulting|contact|contractors|cooking|cool|coop|corp|corsica|country|coupon|coupons|courses|cpa|cr|credit|creditcard|creditunion|cricket|crown|crs|cruise|cruises|cu|cuisinella|cv|cw|cx|cy|cymru|cyou|cz|dad|dance|data|date|dating|datsun|day|dclk|dds|de|deal|dealer|deals|degree|delivery|dell|deloitte|delta|democrat|dental|dentist|desi|design|dev|dhl|diamonds|diet|digital|direct|directory|discount|discover|dish|diy|dj|dk|dm|dnp|do|docs|doctor|dog|domains|dot|download|drive|dtv|dubai|dupont|durban|dvag|dvr|dz|earth|eat|ec|eco|edeka|edu|education|ee|eg|email|emerck|energy|engineer|engineering|enterprises|epson|equipment|er|ericsson|erni|es|esq|estate|et|eu|eurovision|eus|events|example|exchange|expert|exposed|express|extraspace|fage|fail|fairwinds|faith|family|fan|fans|farm|farmers|fashion|fast|fedex|feedback|ferrari|ferrero|fi|fidelity|fido|film|final|finance|financial|fire|firestone|firmdale|fish|fishing|fit|fitness|fj|fk|flickr|flights|flir|florist|flowers|fly|fm|fo|foo|food|football|ford|forex|forsale|forum|foundation|fox|fr|free|fresenius|frl|frogans|frontier|ftr|fujitsu|fun|fund|furniture|futbol|fyi|ga|gal|gallery|gallo|gallup|game|games|gap|garden|gay|gb|gbiz|gd|gdn|ge|gea|gent|genting|george|gf|gg|ggee|gh|gi|gift|gifts|gives|giving|gl|glass|gle|global|globo|gm|gmail|gmbh|gmo|gmx|gn|godaddy|gold|goldpoint|golf|goodyear|goog|google|gop|got|gov|gp|gq|gr|grainger|graphics|gratis|green|gripe|grocery|group|gs|gt|gu|gucci|guge|guide|guitars|guru|gw|gy|hair|hamburg|hangout|haus|hbo|hdfc|hdfcbank|health|healthcare|help|helsinki|here|hermes|hiphop|hisamitsu|hitachi|hiv|hk|hkt|hm|hn|hockey|holdings|holiday|home|homedepot|homegoods|homes|homesense|honda|horse|hospital|host|hosting|hot|hotels|hotmail|house|how|hr|hsbc|ht|hu|hughes|hyatt|hyundai|ibm|icbc|ice|icu|id|ie|ieee|ifm|ikano|il|im|imamat|imdb|immo|immobilien|in|inc|industries|infiniti|info|ing|ink|institute|insurance|insure|int|internal|international|intranet|intuit|invalid|investments|io|ipiranga|iq|ir|irish|is|ismaili|ist|istanbul|it|itau|itv|jaguar|java|jcb|je|jeep|jetzt|jewelry|jio|jll|jm|jmp|jnj|jo|jobs|joburg|jot|joy|jp|jpmorgan|jprs|juegos|juniper|kaufen|kddi|ke|kerryhotels|kerryproperties|kfh|kg|kh|ki|kia|kids|kim|kindle|kitchen|kiwi|km|kn|koeln|komatsu|kosher|kp|kpmg|kpn|kr|krd|kred|kuokgroup|kw|ky|kyoto|kz|la|lacaixa|lamborghini|lamer|lan|land|landrover|lanxess|lasalle|lat|latino|latrobe|law|lawyer|lb|lc|lds|lease|leclerc|lefrak|legal|lego|lexus|lgbt|li|lidl|life|lifeinsurance|lifestyle|lighting|like|lilly|limited|limo|lincoln|link|live|living|lk|llc|llp|loan|loans|local|localdomain|localhost|locker|locus|lol|london|lotte|lotto|love|lpl|lplfinancial|lr|ls|lt|ltd|ltda|lu|lundbeck|luxe|luxury|lv|ly|ma|madrid|maif|maison|makeup|man|management|mango|map|market|marketing|markets|marriott|marshalls|mattel|mba|mc|mckinsey|md|me|med|media|meet|melbourne|meme|memorial|men|menu|merck|merckmsd|mg|mh|miami|microsoft|mil|mini|mint|mit|mitsubishi|mk|ml|mlb|mls|mm|mma|mn|mo|mobi|mobile|moda|moe|moi|mom|monash|money|monster|mormon|mortgage|moscow|moto|motorcycles|mov|movie|mp|mq|mr|ms|msd|mt|mtn|mtr|mu|museum|music|mv|mw|mx|my|mz|na|nab|nagoya|name|navy|nba|nc|ne|nec|net|netbank|netflix|network|neustar|new|news|next|nextdirect|nexus|nf|nfl|ng|ngo|nhk|ni|nico|nike|nikon|ninja|nissan|nissay|nl|no|nokia|norton|now|nowruz|nowtv|np|nr|nra|nrw|ntt|nu|nyc|nz|obi|observer|office|okinawa|olayan|olayangroup|ollo|om|omega|one|ong|onl|online|ooo|open|oracle|orange|org|organic|origins|osaka|otsuka|ott|ovh|pa|page|panasonic|paris|pars|partners|parts|party|pay|pccw|pe|pet|pf|pfizer|pg|ph|pharmacy|phd|philips|phone|photo|photography|photos|physio|pics|pictet|pictures|pid|pin|ping|pink|pioneer|pizza|pk|pl|place|play|playstation|plumbing|plus|pm|pn|pnc|pohl|poker|politie|porn|post|pr|praxi|press|prime|private|pro|prod|productions|prof|progressive|promo|properties|property|protection|pru|prudential|ps|pt|pub|pw|pwc|py|qa|qpon|quebec|quest|racing|radio|re|read|realestate|realtor|realty|recipes|red|redumbrella|rehab|reise|reisen|reit|reliance|ren|rent|rentals|repair|report|republican|rest|restaurant|review|reviews|rexroth|rich|richardli|ricoh|ril|rio|rip|ro|rocks|rodeo|rogers|room|rs|rsvp|ru|rugby|ruhr|run|rw|rwe|ryukyu|sa|saarland|safe|safety|sakura|sale|salon|samsclub|samsung|sandvik|sandvikcoromant|sanofi|sap|sarl|sas|save|saxo|sb|sbi|sbs|sc|scb|schaeffler|schmidt|scholarships|school|schule|schwarz|science|scot|sd|se|search|seat|secure|security|seek|select|sener|services|seven|sew|sex|sexy|sfr|sg|sh|shangrila|sharp|shell|shia|shiksha|shoes|shop|shopping|shouji|show|si|silk|sina|singles|site|sj|sk|ski|skin|sky|skype|sl|sling|sm|smart|smile|sn|sncf|so|soccer|social|softbank|software|sohu|solar|solutions|song|sony|soy|spa|space|sport|spot|sr|srl|ss|st|stada|staples|star|statebank|statefarm|stc|stcgroup|stockholm|storage|store|stream|studio|study|style|su|sucks|supplies|supply|support|surf|surgery|suzuki|sv|svc|swatch|swiss|sx|sy|sydney|systems|sz|tab|taipei|talk|taobao|target|tatamotors|tatar|tattoo|tax|taxi|tc|tci|td|tdk|team|tech|technology|tel|temasek|tennis|test|teva|tf|tg|th|thd|theater|theatre|tiaa|tickets|tienda|tips|tires|tirol|tj|tjmaxx|tjx|tk|tkmaxx|tl|tm|tmall|tn|to|today|tokyo|tools|top|toray|toshiba|total|tours|town|toyota|toys|tr|trade|trading|training|travel|travelers|travelersinsurance|trust|trv|tt|tube|tui|tunes|tushu|tv|tvs|tw|tz|ua|ubank|ubs|ug|uk|unicom|university|uno|uol|ups|us|uy|uz|va|vacations|vana|vanguard|vc|ve|vegas|ventures|verisign|versicherung|vet|vg|vi|viajes|video|vig|viking|villas|vin|vip|virgin|visa|vision|viva|vivo|vlaanderen|vn|vodka|volvo|vote|voting|voto|voyage|vpc|vu|wales|walmart|walter|wang|wanggou|watch|watches|weather|weatherchannel|web|webcam|weber|website|wed|wedding|weibo|weir|wf|whoswho|wien|wiki|williamhill|win|windows|wine|winners|wme|woodside|work|works|world|wow|ws|wtc|wtf|xbox|xerox|xihuan|xin|xxx|xyz|yachts|yahoo|yamaxun|yandex|ye|yodobashi|yoga|yokohama|you|youtube|yt|yun|za|zappos|zara|zero|zip|zm|zone|zuerich|zw)\b'''
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "match"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.openai\.com$''',
+    '''^api\.github\.com$''',
+    # Google OIDC's documented issuer and the upstream Go YAML module host.
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    # Us, in public. Only these hosts -- any other label under either apex is
+    # an internal service name and is exactly what this rule exists to catch.
+    '''^www\.conductorone\.com$''',
+    '''^www\.c1\.ai$''',
+    # Source control, the module proxy, and the checksum database.
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    # The portal's Google Fonts stylesheet import (frontend/src/styles.css).
+    '''^fonts\.googleapis\.com$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^pkg\.go\.dev$''',
+    # Licences, governance, and the security contact's own publications.
+    '''^www\.apache\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    # Placeholder domains reserved by RFC 2606 / RFC 6761 for documentation.
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27. These are shaped like hostnames and are not hosts: an API group
+    # is an identifier in the Kubernetes type system, and a provider that could
+    # not name one could not write an object. Exact-anchored, so no apex is
+    # widened -- in particular svc.cluster.local is allowed as the bare suffix
+    # only, because a full <service>.<namespace>.svc.cluster.local name would
+    # disclose an internal service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^kubectl\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+    # AWS *service* endpoints only -- global (s3.amazonaws.com) and regional
+    # (dynamodb.us-east-1.amazonaws.com). Deliberately NOT the whole domain:
+    # review pointed out that a blanket amazonaws.com exception waves through
+    # prod-db.abc123.us-east-1.rds.amazonaws.com, which is a deployment-specific
+    # endpoint and precisely the infrastructure detail this rule is for.
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+    # AWS's own public documentation and the RDS regional trust-bundle host
+    # (terraform/README.md), which operators are told to download from by name.
+    '''^docs\.aws\.amazon\.com$''',
+    '''^truststore\.pki\.rds\.amazonaws\.com$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "match"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl)$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "exact label and option keys in the AWS deployment, which are namespaces and not hosts"
+  condition = "AND"
+  paths = ['''(?:^|/)terraform/.*\.(tf|tftpl)$''']
+  regexTarget = "match"
+  # The same class compute/aws/routes.go splits its namespace constant to avoid:
+  # a reverse-proxy label key and a container-runtime network option are both
+  # shaped like hostnames and neither is one. They cannot be split here, because
+  # Terraform is writing the literal key a daemon reads. Exact-anchored, so a
+  # real host in the same file stays a finding.
+  regexes = [
+    '''^traefik\.http\.services$''',
+    '''^traefik\.http\.routers$''',
+    '''^traefik\.http\.middlewares$''',
+    '''^com\.docker\.network$''',
+    '''^com\.docker\.network\.bridge\.name$''',
+    '''^com\.docker\.network\.bridge\.enable_icc$''',
+    # An HCL property-access expression, not a DNS name.
+    '''^each\.value\.name$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "placeholder tenant URL in the example tfvars, not a real host"
+  condition = "AND"
+  paths = ['''(?:^|/)terraform/environments/example/terraform\.tfvars\.example$''']
+  regexTarget = "match"
+  regexes = ['''^tenant\.conductor\.one$''']
+
+  [[rules.allowlists]]
+  description = "Go source, where this rule cannot tell a selector chain from a host"
+  # Not a hostname exception: the same shapes are matched in .go files by the
+  # three rules below, which require the token to be data rather than an
+  # expression. Removing this without removing those re-opens 218 findings of
+  # ordinary Go on the first large port.
+  paths = ['''\.go$''']
+
+  [[rules.allowlists]]
+  description = "exact property-access expressions in the authored React portal, not DNS names"
+  condition = "AND"
+  paths = ['''(?:^|/)frontend/src/.*\.tsx?$''']
+  regexTarget = "match"
+  # Keep source files under all secret/URL rules. These are reviewed expression
+  # names, not a blanket TypeScript exemption or permission for their subdomains.
+  regexes = [
+    '''^app\.specification\.name$''',
+    '''^session\.identity\.email$''',
+    '''^consent\.identity\.email$''',
+    '''^consent\.scopes\.map$''',
+    '''^providers\.data\.providers\.map$''',
+    '''^query\.state\.data$''',
+    '''^input\.bucket\.zone$''',
+    '''^p\.advisories\.map$''',
+    '''^secrets\.items\.map$''',
+    '''^section\.pages\.map$''',
+    '''^app\.owners\.map$''',
+    '''^c\.can\.map$''',
+    '''^c\.cannot\.map$''',
+    '''^data\.installations\.map$''',
+    '''^g\.items\.map$''',
+    '''^page\.lede\.map$''',
+    '''^page\.toc\.map$''',
+    '''^r\.env\.map$''',
+    '''^r\.stats\.map$''',
+    '''^target\.repositories\.map$''',
+    '''^targets\.data\.map$''',
+    '''^token\.rows\.map$''',
+    '''^usage\.buckets\.map$''',
+    '''^application\.specification\.name$''',
+  ]
+
+# Two labels, as a value rather than as an identifier.
+#
+# The general rule above needs three labels, because `boundary.go` and `ci.yml`
+# are shaped exactly like two-label hostnames -- and so is every unexported Go
+# method call on a lowercase receiver (`rule.denies`, `cfg.allows`). Review
+# pointed out the cost of that compromise: a plain two-label host assigned to a
+# variable is one of the most routine configuration shapes there is, and it
+# sailed through.
+#
+# The discriminator is position, not spelling. A hostname that is a *value* is
+# quoted, or follows an `=` or a `:`, and then the token ends. An identifier in
+# source code never looks like that. So this catches the assigned and YAML forms
+# without dragging in every method call in the repository, and the file-name
+# exception below still lets `boundary.go` past.
+#
+# The suffix must be a real registrable one, and it is no more the
+# discriminator here than it is for the rule above: `store`, `name`, `now` and
+# `mu` are all registrable, so `tc.value` is separated from a host but
+# `h.p.store.mu` is not. Position does not rescue it either. A Go composite
+# literal field is written `Host: rec.name,` -- a key, a colon, a value -- which
+# is the shape this rule keys on, so the `:` branch reports struct literals.
+#
+# The list is therefore not tightened, and .go files step aside to the three
+# Go-scoped rules further down. One of those, `apphub-hostname-go-yaml-key`,
+# keeps this rule's reach over a YAML mapping line embedded in a Go raw string,
+# which is a real bypass and not one to lose.
+#
+# The list below is every ASCII suffix IANA delegates (data.iana.org/TLD,
+# version 2026081900), plus the private-use ones internal hosts actually take --
+# internal, corp, lan, intranet, local and friends -- which IANA does not
+# delegate and which are precisely what this rule exists to catch. It is the
+# complete set rather than a short one on purpose: a short list was the round-3
+# defect, where a synthetic host under an unlisted suffix walked through.
+#
+# Refresh it from IANA if a new suffix ever matters. The context-anchored rules
+# below -- URLs, and YAML values, including the Go-scoped mapping-line rule --
+# deliberately do NOT require a known suffix, so any host in a URL or a YAML
+# value stays fail-closed whatever it ends in.
+[[rules]]
+id = "apphub-hostname-two-label"
+description = "hostname assigned as a value that is not on the allowlist of hosts this repository may reference"
+regex = '''(?:["'`]|(?:^|[^!<>=:])[:=][ \t]*)((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:aaa|aarp|abb|abbott|abbvie|abc|able|abogado|abudhabi|ac|academy|accenture|accountant|accountants|aco|actor|ad|ads|adult|ae|aeg|aero|aetna|af|afl|africa|ag|agakhan|agency|ai|aig|airbus|airforce|airtel|akdn|al|alibaba|alipay|allfinanz|allstate|ally|alsace|alstom|am|amazon|americanexpress|americanfamily|amex|amfam|amica|amsterdam|analytics|android|anquan|anz|ao|aol|apartments|app|apple|aq|aquarelle|ar|arab|aramco|archi|army|arpa|art|arte|as|asda|asia|associates|at|athleta|attorney|au|auction|audi|audible|audio|auspost|author|auto|autos|aw|aws|ax|axa|az|azure|ba|baby|baidu|banamex|band|bank|bar|barcelona|barclaycard|barclays|barefoot|bargains|baseball|basketball|bauhaus|bayern|bb|bbc|bbt|bbva|bcg|bcn|bd|be|beats|beauty|beer|berlin|best|bestbuy|bet|bf|bg|bh|bharti|bi|bible|bid|bike|bing|bingo|bio|biz|bj|black|blackfriday|blockbuster|blog|bloomberg|blue|bm|bms|bmw|bn|bnpparibas|bo|boats|boehringer|bofa|bom|bond|boo|book|booking|bosch|bostik|boston|bot|boutique|box|br|bradesco|bridgestone|broadway|broker|brother|brussels|bs|bt|build|builders|business|buy|buzz|bv|bw|by|bz|bzh|ca|cab|cafe|cal|call|calvinklein|cam|camera|camp|canon|capetown|capital|capitalone|car|caravan|cards|care|career|careers|cars|casa|case|cash|casino|cat|catering|catholic|cba|cbn|cbre|cc|cd|center|ceo|cern|cf|cfa|cfd|cg|ch|chanel|channel|charity|chase|chat|cheap|chintai|christmas|chrome|church|ci|cipriani|circle|cisco|citadel|citi|citic|city|ck|cl|claims|cleaning|click|clinic|clinique|clothing|cloud|club|clubmed|cluster|cm|cn|co|coach|codes|coffee|college|cologne|com|commbank|community|company|compare|computer|comsec|condos|construction|consulting|contact|contractors|cooking|cool|coop|corp|corsica|country|coupon|coupons|courses|cpa|cr|credit|creditcard|creditunion|cricket|crown|crs|cruise|cruises|cu|cuisinella|cv|cw|cx|cy|cymru|cyou|cz|dad|dance|data|date|dating|datsun|day|dclk|dds|de|deal|dealer|deals|degree|delivery|dell|deloitte|delta|democrat|dental|dentist|desi|design|dev|dhl|diamonds|diet|digital|direct|directory|discount|discover|dish|diy|dj|dk|dm|dnp|do|docs|doctor|dog|domains|dot|download|drive|dtv|dubai|dupont|durban|dvag|dvr|dz|earth|eat|ec|eco|edeka|edu|education|ee|eg|email|emerck|energy|engineer|engineering|enterprises|epson|equipment|er|ericsson|erni|es|esq|estate|et|eu|eurovision|eus|events|example|exchange|expert|exposed|express|extraspace|fage|fail|fairwinds|faith|family|fan|fans|farm|farmers|fashion|fast|fedex|feedback|ferrari|ferrero|fi|fidelity|fido|film|final|finance|financial|fire|firestone|firmdale|fish|fishing|fit|fitness|fj|fk|flickr|flights|flir|florist|flowers|fly|fm|fo|foo|food|football|ford|forex|forsale|forum|foundation|fox|fr|free|fresenius|frl|frogans|frontier|ftr|fujitsu|fun|fund|furniture|futbol|fyi|ga|gal|gallery|gallo|gallup|game|games|gap|garden|gay|gb|gbiz|gd|gdn|ge|gea|gent|genting|george|gf|gg|ggee|gh|gi|gift|gifts|gives|giving|gl|glass|gle|global|globo|gm|gmail|gmbh|gmo|gmx|gn|godaddy|gold|goldpoint|golf|goodyear|goog|google|gop|got|gov|gp|gq|gr|grainger|graphics|gratis|green|gripe|grocery|group|gs|gt|gu|gucci|guge|guide|guitars|guru|gw|gy|hair|hamburg|hangout|haus|hbo|hdfc|hdfcbank|health|healthcare|help|helsinki|here|hermes|hiphop|hisamitsu|hitachi|hiv|hk|hkt|hm|hn|hockey|holdings|holiday|home|homedepot|homegoods|homes|homesense|honda|horse|hospital|host|hosting|hot|hotels|hotmail|house|how|hr|hsbc|ht|hu|hughes|hyatt|hyundai|ibm|icbc|ice|icu|id|ie|ieee|ifm|ikano|il|im|imamat|imdb|immo|immobilien|in|inc|industries|infiniti|info|ing|ink|institute|insurance|insure|int|internal|international|intranet|intuit|invalid|investments|io|ipiranga|iq|ir|irish|is|ismaili|ist|istanbul|it|itau|itv|jaguar|java|jcb|je|jeep|jetzt|jewelry|jio|jll|jm|jmp|jnj|jo|jobs|joburg|jot|joy|jp|jpmorgan|jprs|juegos|juniper|kaufen|kddi|ke|kerryhotels|kerryproperties|kfh|kg|kh|ki|kia|kids|kim|kindle|kitchen|kiwi|km|kn|koeln|komatsu|kosher|kp|kpmg|kpn|kr|krd|kred|kuokgroup|kw|ky|kyoto|kz|la|lacaixa|lamborghini|lamer|lan|land|landrover|lanxess|lasalle|lat|latino|latrobe|law|lawyer|lb|lc|lds|lease|leclerc|lefrak|legal|lego|lexus|lgbt|li|lidl|life|lifeinsurance|lifestyle|lighting|like|lilly|limited|limo|lincoln|link|live|living|lk|llc|llp|loan|loans|local|localdomain|localhost|locker|locus|lol|london|lotte|lotto|love|lpl|lplfinancial|lr|ls|lt|ltd|ltda|lu|lundbeck|luxe|luxury|lv|ly|ma|madrid|maif|maison|makeup|man|management|mango|map|market|marketing|markets|marriott|marshalls|mattel|mba|mc|mckinsey|md|me|med|media|meet|melbourne|meme|memorial|men|menu|merck|merckmsd|mg|mh|miami|microsoft|mil|mini|mint|mit|mitsubishi|mk|ml|mlb|mls|mm|mma|mn|mo|mobi|mobile|moda|moe|moi|mom|monash|money|monster|mormon|mortgage|moscow|moto|motorcycles|mov|movie|mp|mq|mr|ms|msd|mt|mtn|mtr|mu|museum|music|mv|mw|mx|my|mz|na|nab|nagoya|name|navy|nba|nc|ne|nec|net|netbank|netflix|network|neustar|new|news|next|nextdirect|nexus|nf|nfl|ng|ngo|nhk|ni|nico|nike|nikon|ninja|nissan|nissay|nl|no|nokia|norton|now|nowruz|nowtv|np|nr|nra|nrw|ntt|nu|nyc|nz|obi|observer|office|okinawa|olayan|olayangroup|ollo|om|omega|one|ong|onl|online|ooo|open|oracle|orange|org|organic|origins|osaka|otsuka|ott|ovh|pa|page|panasonic|paris|pars|partners|parts|party|pay|pccw|pe|pet|pf|pfizer|pg|ph|pharmacy|phd|philips|phone|photo|photography|photos|physio|pics|pictet|pictures|pid|pin|ping|pink|pioneer|pizza|pk|pl|place|play|playstation|plumbing|plus|pm|pn|pnc|pohl|poker|politie|porn|post|pr|praxi|press|prime|private|pro|prod|productions|prof|progressive|promo|properties|property|protection|pru|prudential|ps|pt|pub|pw|pwc|py|qa|qpon|quebec|quest|racing|radio|re|read|realestate|realtor|realty|recipes|red|redumbrella|rehab|reise|reisen|reit|reliance|ren|rent|rentals|repair|report|republican|rest|restaurant|review|reviews|rexroth|rich|richardli|ricoh|ril|rio|rip|ro|rocks|rodeo|rogers|room|rs|rsvp|ru|rugby|ruhr|run|rw|rwe|ryukyu|sa|saarland|safe|safety|sakura|sale|salon|samsclub|samsung|sandvik|sandvikcoromant|sanofi|sap|sarl|sas|save|saxo|sb|sbi|sbs|sc|scb|schaeffler|schmidt|scholarships|school|schule|schwarz|science|scot|sd|se|search|seat|secure|security|seek|select|sener|services|seven|sew|sex|sexy|sfr|sg|sh|shangrila|sharp|shell|shia|shiksha|shoes|shop|shopping|shouji|show|si|silk|sina|singles|site|sj|sk|ski|skin|sky|skype|sl|sling|sm|smart|smile|sn|sncf|so|soccer|social|softbank|software|sohu|solar|solutions|song|sony|soy|spa|space|sport|spot|sr|srl|ss|st|stada|staples|star|statebank|statefarm|stc|stcgroup|stockholm|storage|store|stream|studio|study|style|su|sucks|supplies|supply|support|surf|surgery|suzuki|sv|svc|swatch|swiss|sx|sy|sydney|systems|sz|tab|taipei|talk|taobao|target|tatamotors|tatar|tattoo|tax|taxi|tc|tci|td|tdk|team|tech|technology|tel|temasek|tennis|test|teva|tf|tg|th|thd|theater|theatre|tiaa|tickets|tienda|tips|tires|tirol|tj|tjmaxx|tjx|tk|tkmaxx|tl|tm|tmall|tn|to|today|tokyo|tools|top|toray|toshiba|total|tours|town|toyota|toys|tr|trade|trading|training|travel|travelers|travelersinsurance|trust|trv|tt|tube|tui|tunes|tushu|tv|tvs|tw|tz|ua|ubank|ubs|ug|uk|unicom|university|uno|uol|ups|us|uy|uz|va|vacations|vana|vanguard|vc|ve|vegas|ventures|verisign|versicherung|vet|vg|vi|viajes|video|vig|viking|villas|vin|vip|virgin|visa|vision|viva|vivo|vlaanderen|vn|vodka|volvo|vote|voting|voto|voyage|vpc|vu|wales|walmart|walter|wang|wanggou|watch|watches|weather|weatherchannel|web|webcam|weber|website|wed|wedding|weibo|weir|wf|whoswho|wien|wiki|williamhill|win|windows|wine|winners|wme|woodside|work|works|world|wow|ws|wtc|wtf|xbox|xerox|xihuan|xin|xxx|xyz|yachts|yahoo|yamaxun|yandex|ye|yodobashi|yoga|yokohama|you|youtube|yt|yun|za|zappos|zara|zero|zip|zm|zone|zuerich|zw))(?:["'`]|\s|$)'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27. These are shaped like hostnames and are not hosts: an API group
+    # is an identifier in the Kubernetes type system, and a provider that could
+    # not name one could not write an object. Exact-anchored, so no apex is
+    # widened -- in particular svc.cluster.local is allowed as the bare suffix
+    # only, because a full <service>.<namespace>.svc.cluster.local name would
+    # disclose an internal service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Go source, where this rule cannot tell a selector chain from a host"
+  # Not a hostname exception: the same shapes are matched in .go files by the
+  # three rules below, which require the token to be data rather than an
+  # expression. Removing this without removing those re-opens 218 findings of
+  # ordinary Go on the first large port.
+  paths = ['''\.go$''']
+
+  [[rules.allowlists]]
+  description = "exact expressions and unit targets in the AWS deployment, not DNS names"
+  condition = "AND"
+  paths = ['''(?:^|/)terraform/.*\.(tf|tftpl)$''']
+  regexTarget = "secret"
+  # `p.id` and `each.value.name` are HCL property accesses; multi-user.target is
+  # the systemd target the worker's unit installs into. Reviewed names, not a
+  # blanket exemption for the tree -- a real two-label host in these files is
+  # still a finding.
+  regexes = [
+    '''^p\.id$''',
+    '''^each\.value\.name$''',
+    '''^multi-user\.target$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "the cluster module's Terraform address, an HCL module path not a host"
+  condition = "AND"
+  paths = ['''^Makefile$''', '''(?:^|/)terraform/modules/build/main\.tf$''']
+  regexTarget = "secret"
+  regexes = ['''^module\.cluster$''']
+
+  [[rules.allowlists]]
+  description = "the bucket zone field identifier in the application form"
+  condition = "AND"
+  paths = ['''(?:^|/)frontend/src/components/ApplicationForm\.tsx$''']
+  regexTarget = "secret"
+  regexes = ['''^bucket\.zone$''']
+
+  [[rules.allowlists]]
+  description = "exact property-access expressions in the C1 design system portal, not DNS names"
+  condition = "AND"
+  paths = ['''(?:^|/)frontend/src/.*\.tsx?$''']
+  regexTarget = "secret"
+  # Keep source files under all secret/URL rules. These are reviewed expression
+  # names, not a blanket TypeScript exemption or permission for their subdomains.
+  # `.bg`/`.id`/`.dot` are design-token property names (background color, id,
+  # status dot) that happen to end in registrable suffixes.
+  regexes = [
+    '''^c\.bg$''',
+    '''^t\.id$''',
+    '''^s\.bg$''',
+    '''^meta\.dot$''',
+    '''^owner\.email$''',
+    '''^owner\.id$''',
+    '''^app\.id$''',
+    '''^app\.live$''',
+    '''^bar\.total$''',
+    '''^usage\.data$''',
+    '''^published\.internal$''',
+    '''^entitlements\.data$''',
+    '''^flags\.data$''',
+    '''^mappings\.data$''',
+    '''^members\.data$''',
+    '''^app\.specification\.name$''',
+    '''^application\.specification\.name$''',
+  ]
+
+# Go source: the same shapes, but only where the token is data.
+#
+# The two rules above ask what a token looks like. In Go that question has no
+# answer, because a selector chain and a hostname are the same string --
+# `h.p.store.mu` against a three-label internal host. Two rounds of tightening
+# the suffix list proved it, and the `store/` import fence reached the same
+# conclusion from the other direction: it stopped reading import strings out of
+# the file and asks the toolchain instead (`go list -e -deps -test -json`, in
+# internal/boundary/load.go), so it compares what the compiler resolves rather
+# than what the text says.
+#
+# What can be answered is where the token sits. A hostname that has been
+# disclosed is data -- a string literal, a struct tag (which is a string
+# literal), a URL, a YAML value. A selector chain is an expression, and is never
+# quoted. So each shape rule above gets a Go-scoped counterpart whose only
+# difference is that requirement. No existing regex is modified.
+#
+# The disclosure this repository is being ported away from is an internal domain
+# inside a Go string literal, embedded in a format string. That is the shape
+# these rules exist to keep catching, and hack/check-secret-rules.sh plants it.
+#
+# Given up deliberately, and what still covers it:
+#
+#   * A bare host in a Go comment that is not in a URL.
+#     `apphub-hostname-in-url` still catches it with a scheme, at any suffix.
+#     Measured on the first large port: all six comment-borne findings were
+#     Kubernetes API group names, and none was a hostname.
+#   * A host in a Go raw string spanning lines, with neither a `key:` nor a
+#     block indicator. `apphub-hostname-block-scalar` already stepped aside
+#     there, for the reason recorded on that rule.
+#
+# NOT closed by these rules, and not closable by any of them: a domain-shaped
+# token that is an identifier rather than a host -- a Kubernetes API group, or a
+# map key spelled like a two-label host. Inside a string literal those are
+# character-for-character indistinguishable from a hardcoded internal host in
+# the same position, so no matching rule can separate them. Which third-party
+# namespaces this repository may name is a policy question, not a regex defect,
+# and it is left open here rather than answered with an allowlist entry that
+# would blind the rule to a whole apex.
+
+[[rules]]
+id = "apphub-hostname-go-string"
+description = "three-or-more-label hostname inside a Go string literal that is not on the allowlist of hosts this repository may reference"
+path = '''\.go$'''
+regex = '''["`][^"`\n]*?\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}(?:aaa|aarp|abb|abbott|abbvie|abc|able|abogado|abudhabi|ac|academy|accenture|accountant|accountants|aco|actor|ad|ads|adult|ae|aeg|aero|aetna|af|afl|africa|ag|agakhan|agency|ai|aig|airbus|airforce|airtel|akdn|al|alibaba|alipay|allfinanz|allstate|ally|alsace|alstom|am|amazon|americanexpress|americanfamily|amex|amfam|amica|amsterdam|analytics|android|anquan|anz|ao|aol|apartments|app|apple|aq|aquarelle|ar|arab|aramco|archi|army|arpa|art|arte|as|asda|asia|associates|at|athleta|attorney|au|auction|audi|audible|audio|auspost|author|auto|autos|aw|aws|ax|axa|az|azure|ba|baby|baidu|banamex|band|bank|bar|barcelona|barclaycard|barclays|barefoot|bargains|baseball|basketball|bauhaus|bayern|bb|bbc|bbt|bbva|bcg|bcn|bd|be|beats|beauty|beer|berlin|best|bestbuy|bet|bf|bg|bh|bharti|bi|bible|bid|bike|bing|bingo|bio|biz|bj|black|blackfriday|blockbuster|blog|bloomberg|blue|bm|bms|bmw|bn|bnpparibas|bo|boats|boehringer|bofa|bom|bond|boo|book|booking|bosch|bostik|boston|bot|boutique|box|br|bradesco|bridgestone|broadway|broker|brother|brussels|bs|bt|build|builders|business|buy|buzz|bv|bw|by|bz|bzh|ca|cab|cafe|cal|call|calvinklein|cam|camera|camp|canon|capetown|capital|capitalone|car|caravan|cards|care|career|careers|cars|casa|case|cash|casino|cat|catering|catholic|cba|cbn|cbre|cc|cd|center|ceo|cern|cf|cfa|cfd|cg|ch|chanel|channel|charity|chase|chat|cheap|chintai|christmas|chrome|church|ci|cipriani|circle|cisco|citadel|citi|citic|city|ck|cl|claims|cleaning|click|clinic|clinique|clothing|cloud|club|clubmed|cluster|cm|cn|co|coach|codes|coffee|college|cologne|com|commbank|community|company|compare|computer|comsec|condos|construction|consulting|contact|contractors|cooking|cool|coop|corp|corsica|country|coupon|coupons|courses|cpa|cr|credit|creditcard|creditunion|cricket|crown|crs|cruise|cruises|cu|cuisinella|cv|cw|cx|cy|cymru|cyou|cz|dad|dance|data|date|dating|datsun|day|dclk|dds|de|deal|dealer|deals|degree|delivery|dell|deloitte|delta|democrat|dental|dentist|desi|design|dev|dhl|diamonds|diet|digital|direct|directory|discount|discover|dish|diy|dj|dk|dm|dnp|do|docs|doctor|dog|domains|dot|download|drive|dtv|dubai|dupont|durban|dvag|dvr|dz|earth|eat|ec|eco|edeka|edu|education|ee|eg|email|emerck|energy|engineer|engineering|enterprises|epson|equipment|er|ericsson|erni|es|esq|estate|et|eu|eurovision|eus|events|example|exchange|expert|exposed|express|extraspace|fage|fail|fairwinds|faith|family|fan|fans|farm|farmers|fashion|fast|fedex|feedback|ferrari|ferrero|fi|fidelity|fido|film|final|finance|financial|fire|firestone|firmdale|fish|fishing|fit|fitness|fj|fk|flickr|flights|flir|florist|flowers|fly|fm|fo|foo|food|football|ford|forex|forsale|forum|foundation|fox|fr|free|fresenius|frl|frogans|frontier|ftr|fujitsu|fun|fund|furniture|futbol|fyi|ga|gal|gallery|gallo|gallup|game|games|gap|garden|gay|gb|gbiz|gd|gdn|ge|gea|gent|genting|george|gf|gg|ggee|gh|gi|gift|gifts|gives|giving|gl|glass|gle|global|globo|gm|gmail|gmbh|gmo|gmx|gn|godaddy|gold|goldpoint|golf|goodyear|goog|google|gop|got|gov|gp|gq|gr|grainger|graphics|gratis|green|gripe|grocery|group|gs|gt|gu|gucci|guge|guide|guitars|guru|gw|gy|hair|hamburg|hangout|haus|hbo|hdfc|hdfcbank|health|healthcare|help|helsinki|here|hermes|hiphop|hisamitsu|hitachi|hiv|hk|hkt|hm|hn|hockey|holdings|holiday|home|homedepot|homegoods|homes|homesense|honda|horse|hospital|host|hosting|hot|hotels|hotmail|house|how|hr|hsbc|ht|hu|hughes|hyatt|hyundai|ibm|icbc|ice|icu|id|ie|ieee|ifm|ikano|il|im|imamat|imdb|immo|immobilien|in|inc|industries|infiniti|info|ing|ink|institute|insurance|insure|int|internal|international|intranet|intuit|invalid|investments|io|ipiranga|iq|ir|irish|is|ismaili|ist|istanbul|it|itau|itv|jaguar|java|jcb|je|jeep|jetzt|jewelry|jio|jll|jm|jmp|jnj|jo|jobs|joburg|jot|joy|jp|jpmorgan|jprs|juegos|juniper|kaufen|kddi|ke|kerryhotels|kerryproperties|kfh|kg|kh|ki|kia|kids|kim|kindle|kitchen|kiwi|km|kn|koeln|komatsu|kosher|kp|kpmg|kpn|kr|krd|kred|kuokgroup|kw|ky|kyoto|kz|la|lacaixa|lamborghini|lamer|lan|land|landrover|lanxess|lasalle|lat|latino|latrobe|law|lawyer|lb|lc|lds|lease|leclerc|lefrak|legal|lego|lexus|lgbt|li|lidl|life|lifeinsurance|lifestyle|lighting|like|lilly|limited|limo|lincoln|link|live|living|lk|llc|llp|loan|loans|local|localdomain|localhost|locker|locus|lol|london|lotte|lotto|love|lpl|lplfinancial|lr|ls|lt|ltd|ltda|lu|lundbeck|luxe|luxury|lv|ly|ma|madrid|maif|maison|makeup|man|management|mango|map|market|marketing|markets|marriott|marshalls|mattel|mba|mc|mckinsey|md|me|med|media|meet|melbourne|meme|memorial|men|menu|merck|merckmsd|mg|mh|miami|microsoft|mil|mini|mint|mit|mitsubishi|mk|ml|mlb|mls|mm|mma|mn|mo|mobi|mobile|moda|moe|moi|mom|monash|money|monster|mormon|mortgage|moscow|moto|motorcycles|mov|movie|mp|mq|mr|ms|msd|mt|mtn|mtr|mu|museum|music|mv|mw|mx|my|mz|na|nab|nagoya|name|navy|nba|nc|ne|nec|net|netbank|netflix|network|neustar|new|news|next|nextdirect|nexus|nf|nfl|ng|ngo|nhk|ni|nico|nike|nikon|ninja|nissan|nissay|nl|no|nokia|norton|now|nowruz|nowtv|np|nr|nra|nrw|ntt|nu|nyc|nz|obi|observer|office|okinawa|olayan|olayangroup|ollo|om|omega|one|ong|onl|online|ooo|open|oracle|orange|org|organic|origins|osaka|otsuka|ott|ovh|pa|page|panasonic|paris|pars|partners|parts|party|pay|pccw|pe|pet|pf|pfizer|pg|ph|pharmacy|phd|philips|phone|photo|photography|photos|physio|pics|pictet|pictures|pid|pin|ping|pink|pioneer|pizza|pk|pl|place|play|playstation|plumbing|plus|pm|pn|pnc|pohl|poker|politie|porn|post|pr|praxi|press|prime|private|pro|prod|productions|prof|progressive|promo|properties|property|protection|pru|prudential|ps|pt|pub|pw|pwc|py|qa|qpon|quebec|quest|racing|radio|re|read|realestate|realtor|realty|recipes|red|redumbrella|rehab|reise|reisen|reit|reliance|ren|rent|rentals|repair|report|republican|rest|restaurant|review|reviews|rexroth|rich|richardli|ricoh|ril|rio|rip|ro|rocks|rodeo|rogers|room|rs|rsvp|ru|rugby|ruhr|run|rw|rwe|ryukyu|sa|saarland|safe|safety|sakura|sale|salon|samsclub|samsung|sandvik|sandvikcoromant|sanofi|sap|sarl|sas|save|saxo|sb|sbi|sbs|sc|scb|schaeffler|schmidt|scholarships|school|schule|schwarz|science|scot|sd|se|search|seat|secure|security|seek|select|sener|services|seven|sew|sex|sexy|sfr|sg|sh|shangrila|sharp|shell|shia|shiksha|shoes|shop|shopping|shouji|show|si|silk|sina|singles|site|sj|sk|ski|skin|sky|skype|sl|sling|sm|smart|smile|sn|sncf|so|soccer|social|softbank|software|sohu|solar|solutions|song|sony|soy|spa|space|sport|spot|sr|srl|ss|st|stada|staples|star|statebank|statefarm|stc|stcgroup|stockholm|storage|store|stream|studio|study|style|su|sucks|supplies|supply|support|surf|surgery|suzuki|sv|svc|swatch|swiss|sx|sy|sydney|systems|sz|tab|taipei|talk|taobao|target|tatamotors|tatar|tattoo|tax|taxi|tc|tci|td|tdk|team|tech|technology|tel|temasek|tennis|test|teva|tf|tg|th|thd|theater|theatre|tiaa|tickets|tienda|tips|tires|tirol|tj|tjmaxx|tjx|tk|tkmaxx|tl|tm|tmall|tn|to|today|tokyo|tools|top|toray|toshiba|total|tours|town|toyota|toys|tr|trade|trading|training|travel|travelers|travelersinsurance|trust|trv|tt|tube|tui|tunes|tushu|tv|tvs|tw|tz|ua|ubank|ubs|ug|uk|unicom|university|uno|uol|ups|us|uy|uz|va|vacations|vana|vanguard|vc|ve|vegas|ventures|verisign|versicherung|vet|vg|vi|viajes|video|vig|viking|villas|vin|vip|virgin|visa|vision|viva|vivo|vlaanderen|vn|vodka|volvo|vote|voting|voto|voyage|vpc|vu|wales|walmart|walter|wang|wanggou|watch|watches|weather|weatherchannel|web|webcam|weber|website|wed|wedding|weibo|weir|wf|whoswho|wien|wiki|williamhill|win|windows|wine|winners|wme|woodside|work|works|world|wow|ws|wtc|wtf|xbox|xerox|xihuan|xin|xxx|xyz|yachts|yahoo|yamaxun|yandex|ye|yodobashi|yoga|yokohama|you|youtube|yt|yun|za|zappos|zara|zero|zip|zm|zone|zuerich|zw))\b'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27 and re-applied here when main moved the Go cases into their own
+    # rules. These are shaped like hostnames and are not hosts: an API group is
+    # an identifier in the Kubernetes type system, and a provider that could not
+    # name one could not write an object. They reach this rule rather than the
+    # generic ones because in Go they are written as string literals, which is
+    # exactly what this rule looks for.
+    #
+    # Exact-anchored, so no apex is widened -- in particular svc.cluster.local is
+    # allowed as the bare suffix only, because a full
+    # <service>.<namespace>.svc.cluster.local name would disclose an internal
+    # service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Docker's reverse-DNS network-option namespace, not a connection destination"
+  regexTarget = "secret"
+  regexes = ['''^com\.docker\.network$''']
+
+  [[rules.allowlists]]
+  description = "the Traefik label key this test asserts on, mirroring the terraform allowlist entries"
+  condition = "AND"
+  paths = ['''(?:^|/)compute/aws/container_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^traefik\.http\.services$''']
+
+  [[rules.allowlists]]
+  description = "the demo ECR registry host, a well-known AWS documentation example account ID used as devseed fixture data"
+  condition = "AND"
+  paths = ['''(?:^|/)store/cmd/devseed/application\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^123456789012\.dkr\.ecr\.us-east-1\.amazonaws\.com$''']
+
+  [[rules.allowlists]]
+  description = "adversarial redirect-rejection fixture, not a host this repository references"
+  condition = "AND"
+  paths = ['''(?:^|/)internal/oauth/clients_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^localhost\.evil\.com$''']
+
+# The two-label form, as a value: the whole string literal is the host.
+#
+# The rule above needs three labels, for the reason its own comment gives -- a
+# quoted `boundary.go` is shaped exactly like a two-label host. The two-label
+# rule this mirrors resolved that by position, and inside Go the position is a
+# quote on each side of the token with nothing between. A Go import path fails
+# that test, because the domain is followed by a slash.
+[[rules]]
+id = "apphub-hostname-go-string-value"
+description = "two-label hostname that is the whole of a Go string literal and is not on the allowlist"
+path = '''\.go$'''
+regex = '''["`]([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:aaa|aarp|abb|abbott|abbvie|abc|able|abogado|abudhabi|ac|academy|accenture|accountant|accountants|aco|actor|ad|ads|adult|ae|aeg|aero|aetna|af|afl|africa|ag|agakhan|agency|ai|aig|airbus|airforce|airtel|akdn|al|alibaba|alipay|allfinanz|allstate|ally|alsace|alstom|am|amazon|americanexpress|americanfamily|amex|amfam|amica|amsterdam|analytics|android|anquan|anz|ao|aol|apartments|app|apple|aq|aquarelle|ar|arab|aramco|archi|army|arpa|art|arte|as|asda|asia|associates|at|athleta|attorney|au|auction|audi|audible|audio|auspost|author|auto|autos|aw|aws|ax|axa|az|azure|ba|baby|baidu|banamex|band|bank|bar|barcelona|barclaycard|barclays|barefoot|bargains|baseball|basketball|bauhaus|bayern|bb|bbc|bbt|bbva|bcg|bcn|bd|be|beats|beauty|beer|berlin|best|bestbuy|bet|bf|bg|bh|bharti|bi|bible|bid|bike|bing|bingo|bio|biz|bj|black|blackfriday|blockbuster|blog|bloomberg|blue|bm|bms|bmw|bn|bnpparibas|bo|boats|boehringer|bofa|bom|bond|boo|book|booking|bosch|bostik|boston|bot|boutique|box|br|bradesco|bridgestone|broadway|broker|brother|brussels|bs|bt|build|builders|business|buy|buzz|bv|bw|by|bz|bzh|ca|cab|cafe|cal|call|calvinklein|cam|camera|camp|canon|capetown|capital|capitalone|car|caravan|cards|care|career|careers|cars|casa|case|cash|casino|cat|catering|catholic|cba|cbn|cbre|cc|cd|center|ceo|cern|cf|cfa|cfd|cg|ch|chanel|channel|charity|chase|chat|cheap|chintai|christmas|chrome|church|ci|cipriani|circle|cisco|citadel|citi|citic|city|ck|cl|claims|cleaning|click|clinic|clinique|clothing|cloud|club|clubmed|cluster|cm|cn|co|coach|codes|coffee|college|cologne|com|commbank|community|company|compare|computer|comsec|condos|construction|consulting|contact|contractors|cooking|cool|coop|corp|corsica|country|coupon|coupons|courses|cpa|cr|credit|creditcard|creditunion|cricket|crown|crs|cruise|cruises|cu|cuisinella|cv|cw|cx|cy|cymru|cyou|cz|dad|dance|data|date|dating|datsun|day|dclk|dds|de|deal|dealer|deals|degree|delivery|dell|deloitte|delta|democrat|dental|dentist|desi|design|dev|dhl|diamonds|diet|digital|direct|directory|discount|discover|dish|diy|dj|dk|dm|dnp|do|docs|doctor|dog|domains|dot|download|drive|dtv|dubai|dupont|durban|dvag|dvr|dz|earth|eat|ec|eco|edeka|edu|education|ee|eg|email|emerck|energy|engineer|engineering|enterprises|epson|equipment|er|ericsson|erni|es|esq|estate|et|eu|eurovision|eus|events|example|exchange|expert|exposed|express|extraspace|fage|fail|fairwinds|faith|family|fan|fans|farm|farmers|fashion|fast|fedex|feedback|ferrari|ferrero|fi|fidelity|fido|film|final|finance|financial|fire|firestone|firmdale|fish|fishing|fit|fitness|fj|fk|flickr|flights|flir|florist|flowers|fly|fm|fo|foo|food|football|ford|forex|forsale|forum|foundation|fox|fr|free|fresenius|frl|frogans|frontier|ftr|fujitsu|fun|fund|furniture|futbol|fyi|ga|gal|gallery|gallo|gallup|game|games|gap|garden|gay|gb|gbiz|gd|gdn|ge|gea|gent|genting|george|gf|gg|ggee|gh|gi|gift|gifts|gives|giving|gl|glass|gle|global|globo|gm|gmail|gmbh|gmo|gmx|gn|godaddy|gold|goldpoint|golf|goodyear|goog|google|gop|got|gov|gp|gq|gr|grainger|graphics|gratis|green|gripe|grocery|group|gs|gt|gu|gucci|guge|guide|guitars|guru|gw|gy|hair|hamburg|hangout|haus|hbo|hdfc|hdfcbank|health|healthcare|help|helsinki|here|hermes|hiphop|hisamitsu|hitachi|hiv|hk|hkt|hm|hn|hockey|holdings|holiday|home|homedepot|homegoods|homes|homesense|honda|horse|hospital|host|hosting|hot|hotels|hotmail|house|how|hr|hsbc|ht|hu|hughes|hyatt|hyundai|ibm|icbc|ice|icu|id|ie|ieee|ifm|ikano|il|im|imamat|imdb|immo|immobilien|in|inc|industries|infiniti|info|ing|ink|institute|insurance|insure|int|internal|international|intranet|intuit|invalid|investments|io|ipiranga|iq|ir|irish|is|ismaili|ist|istanbul|it|itau|itv|jaguar|java|jcb|je|jeep|jetzt|jewelry|jio|jll|jm|jmp|jnj|jo|jobs|joburg|jot|joy|jp|jpmorgan|jprs|juegos|juniper|kaufen|kddi|ke|kerryhotels|kerryproperties|kfh|kg|kh|ki|kia|kids|kim|kindle|kitchen|kiwi|km|kn|koeln|komatsu|kosher|kp|kpmg|kpn|kr|krd|kred|kuokgroup|kw|ky|kyoto|kz|la|lacaixa|lamborghini|lamer|lan|land|landrover|lanxess|lasalle|lat|latino|latrobe|law|lawyer|lb|lc|lds|lease|leclerc|lefrak|legal|lego|lexus|lgbt|li|lidl|life|lifeinsurance|lifestyle|lighting|like|lilly|limited|limo|lincoln|link|live|living|lk|llc|llp|loan|loans|local|localdomain|localhost|locker|locus|lol|london|lotte|lotto|love|lpl|lplfinancial|lr|ls|lt|ltd|ltda|lu|lundbeck|luxe|luxury|lv|ly|ma|madrid|maif|maison|makeup|man|management|mango|map|market|marketing|markets|marriott|marshalls|mattel|mba|mc|mckinsey|md|me|med|media|meet|melbourne|meme|memorial|men|menu|merck|merckmsd|mg|mh|miami|microsoft|mil|mini|mint|mit|mitsubishi|mk|ml|mlb|mls|mm|mma|mn|mo|mobi|mobile|moda|moe|moi|mom|monash|money|monster|mormon|mortgage|moscow|moto|motorcycles|mov|movie|mp|mq|mr|ms|msd|mt|mtn|mtr|mu|museum|music|mv|mw|mx|my|mz|na|nab|nagoya|name|navy|nba|nc|ne|nec|net|netbank|netflix|network|neustar|new|news|next|nextdirect|nexus|nf|nfl|ng|ngo|nhk|ni|nico|nike|nikon|ninja|nissan|nissay|nl|no|nokia|norton|now|nowruz|nowtv|np|nr|nra|nrw|ntt|nu|nyc|nz|obi|observer|office|okinawa|olayan|olayangroup|ollo|om|omega|one|ong|onl|online|ooo|open|oracle|orange|org|organic|origins|osaka|otsuka|ott|ovh|pa|page|panasonic|paris|pars|partners|parts|party|pay|pccw|pe|pet|pf|pfizer|pg|ph|pharmacy|phd|philips|phone|photo|photography|photos|physio|pics|pictet|pictures|pid|pin|ping|pink|pioneer|pizza|pk|pl|place|play|playstation|plumbing|plus|pm|pn|pnc|pohl|poker|politie|porn|post|pr|praxi|press|prime|private|pro|prod|productions|prof|progressive|promo|properties|property|protection|pru|prudential|ps|pt|pub|pw|pwc|py|qa|qpon|quebec|quest|racing|radio|re|read|realestate|realtor|realty|recipes|red|redumbrella|rehab|reise|reisen|reit|reliance|ren|rent|rentals|repair|report|republican|rest|restaurant|review|reviews|rexroth|rich|richardli|ricoh|ril|rio|rip|ro|rocks|rodeo|rogers|room|rs|rsvp|ru|rugby|ruhr|run|rw|rwe|ryukyu|sa|saarland|safe|safety|sakura|sale|salon|samsclub|samsung|sandvik|sandvikcoromant|sanofi|sap|sarl|sas|save|saxo|sb|sbi|sbs|sc|scb|schaeffler|schmidt|scholarships|school|schule|schwarz|science|scot|sd|se|search|seat|secure|security|seek|select|sener|services|seven|sew|sex|sexy|sfr|sg|sh|shangrila|sharp|shell|shia|shiksha|shoes|shop|shopping|shouji|show|si|silk|sina|singles|site|sj|sk|ski|skin|sky|skype|sl|sling|sm|smart|smile|sn|sncf|so|soccer|social|softbank|software|sohu|solar|solutions|song|sony|soy|spa|space|sport|spot|sr|srl|ss|st|stada|staples|star|statebank|statefarm|stc|stcgroup|stockholm|storage|store|stream|studio|study|style|su|sucks|supplies|supply|support|surf|surgery|suzuki|sv|svc|swatch|swiss|sx|sy|sydney|systems|sz|tab|taipei|talk|taobao|target|tatamotors|tatar|tattoo|tax|taxi|tc|tci|td|tdk|team|tech|technology|tel|temasek|tennis|test|teva|tf|tg|th|thd|theater|theatre|tiaa|tickets|tienda|tips|tires|tirol|tj|tjmaxx|tjx|tk|tkmaxx|tl|tm|tmall|tn|to|today|tokyo|tools|top|toray|toshiba|total|tours|town|toyota|toys|tr|trade|trading|training|travel|travelers|travelersinsurance|trust|trv|tt|tube|tui|tunes|tushu|tv|tvs|tw|tz|ua|ubank|ubs|ug|uk|unicom|university|uno|uol|ups|us|uy|uz|va|vacations|vana|vanguard|vc|ve|vegas|ventures|verisign|versicherung|vet|vg|vi|viajes|video|vig|viking|villas|vin|vip|virgin|visa|vision|viva|vivo|vlaanderen|vn|vodka|volvo|vote|voting|voto|voyage|vpc|vu|wales|walmart|walter|wang|wanggou|watch|watches|weather|weatherchannel|web|webcam|weber|website|wed|wedding|weibo|weir|wf|whoswho|wien|wiki|williamhill|win|windows|wine|winners|wme|woodside|work|works|world|wow|ws|wtc|wtf|xbox|xerox|xihuan|xin|xxx|xyz|yachts|yahoo|yamaxun|yandex|ye|yodobashi|yoga|yokohama|you|youtube|yt|yun|za|zappos|zara|zero|zip|zm|zone|zuerich|zw))["`]'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27 and re-applied here when main moved the Go cases into their own
+    # rules. These are shaped like hostnames and are not hosts: an API group is
+    # an identifier in the Kubernetes type system, and a provider that could not
+    # name one could not write an object. They reach this rule rather than the
+    # generic ones because in Go they are written as string literals, which is
+    # exactly what this rule looks for.
+    #
+    # Exact-anchored, so no apex is widened -- in particular svc.cluster.local is
+    # allowed as the bare suffix only, because a full
+    # <service>.<namespace>.svc.cluster.local name would disclose an internal
+    # service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "seeded demo user local-part (name.surname), not a host, in devseed fixture data"
+  condition = "AND"
+  paths = ['''(?:^|/)store/cmd/devseed/catalog\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^hannah\.kim$''']
+
+# A YAML mapping line inside Go source, with the value written in full.
+#
+# An embedded YAML document in a raw string was a real bypass, and the block
+# scalar half of it is closed by `apphub-hostname-block-scalar-indicator`. The
+# other half is the plain scalar -- `key: value`, value on the same line --
+# which the two-label rule reached in .go files through its `:` branch, and
+# which that rule's Go exemption would otherwise drop.
+#
+# That `:` branch is also what made `Host: rec.name` a finding, because a Go
+# composite literal field is written the same way. What separates them is not
+# spelling: gofmt puts a trailing comma on every field of a multi-line composite
+# literal, so a Go field value never ends its line, and a YAML plain scalar
+# always does. Requiring the value to run to the end of the line keeps the YAML
+# and drops the Go.
+#
+# Like the other context-anchored rules, this one requires no known suffix. A
+# YAML value cannot be an identifier, so there is nothing to disambiguate and no
+# reason to be anything but fail-closed.
+
+  [[rules.allowlists]]
+  description = "structured-data keys whose last label is a registrable suffix"
+  regexTarget = "secret"
+  regexes = [
+    # A map key labelling the parts of an endpoint, in the conformance suite's
+    # observed-state map. `host` is a gTLD, so the key is character-for-character
+    # a two-label host in the one position this rule keys on -- alone inside a
+    # string literal -- while its siblings `endpoint.port` and
+    # `endpoint.database` are not registrable suffixes and never fire. The key is
+    # not renamed to dodge the scanner: the siblings set the convention, and
+    # contorting code to satisfy a tool is how a gate starts costing more than it
+    # returns.
+    #
+    # Exact-anchored, one label pair, nothing widened. This block is deliberately
+    # separate from the public-hosts list above, because that list means "hosts
+    # that resolve" and one of them (Datadog) IS a security control; an entry
+    # that is not a host at all does not belong in it. Anything added here must
+    # be a key, must be anchored at both ends, and must be justified in a comment
+    # -- an allowlist is precisely where an internal host would hide.
+    '''^endpoint\.host$''',
+    # Operator configuration field name used for required-field diagnostics.
+    '''^placement\.vpc$''',
+  ]
+[[rules]]
+id = "apphub-hostname-go-yaml-key"
+description = "hostname as the whole value of a YAML mapping line in Go source, as in an embedded manifest"
+path = '''\.go$'''
+regex = '''(?m)^[ \t]*[A-Za-z0-9_.-]+:[ \t]*((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})[ \t]*$'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27 and re-applied here when main moved the Go cases into their own
+    # rules. These are shaped like hostnames and are not hosts: an API group is
+    # an identifier in the Kubernetes type system, and a provider that could not
+    # name one could not write an object. They reach this rule rather than the
+    # generic ones because in Go they are written as string literals, which is
+    # exactly what this rule looks for.
+    #
+    # Exact-anchored, so no apex is widened -- in particular svc.cluster.local is
+    # allowed as the bare suffix only, because a full
+    # <service>.<namespace>.svc.cluster.local name would disclose an internal
+    # service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+# The same hostname, on its own line.
+#
+# A YAML block scalar puts the value on a following line:
+#
+#     host: |
+#       <a two-label internal host>
+#     host: >-
+#       <a two-label internal host>
+#
+# The position rule above keys on adjacency to the `:`, and the `|` or `>-`
+# indicator breaks it -- the continuation line has neither a quote nor a
+# separator. Block scalars are an ordinary way to write a YAML value, so this is
+# not an encoded spelling.
+#
+# The shape that catches it without catching source code: a line whose entire
+# content is indentation and one hostname-shaped token. A Go method call has
+# parentheses, a list item has a dash, a comment has words after it. A bare
+# dotted token alone on an indented line is a value.
+[[rules]]
+id = "apphub-hostname-block-scalar"
+description = "hostname alone on an indented line, as in a YAML block scalar, that is not on the allowlist"
+regex = '''(?m)^[ \t]+((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})[ \t]*$'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27. These are shaped like hostnames and are not hosts: an API group
+    # is an identifier in the Kubernetes type system, and a provider that could
+    # not name one could not write an object. Exact-anchored, so no apex is
+    # widened -- in particular svc.cluster.local is allowed as the bare suffix
+    # only, because a full <service>.<namespace>.svc.cluster.local name would
+    # disclose an internal service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Go source: a lone indented dotted token is more likely an identifier than a host"
+  # Narrow, and paired. An embedded YAML document inside a Go raw string stays
+  # in scope through apphub-hostname-block-scalar-indicator below, which
+  # requires the `key: |` line that makes it a block scalar. What this exemption
+  # gives up is only the case with no indicator at all -- an indented lone
+  # dotted token in Go source -- which is exactly the case that cannot be told
+  # apart from a subtest or metric name.
+  paths = ['''\.go$''']
+
+# The same hostname, in a block scalar that says so.
+#
+# The rule above keys on shape alone -- a lone indented dotted token -- which is
+# ambiguous with ordinary Go source: an identifier such as a subtest or metric
+# name, indented inside a raw string, looks identical. That ambiguity cannot be
+# resolved by spelling. Hyphens, casing, and suffix plausibility all fail on the
+# obvious counterexamples, and enumerating registrable suffixes is the mistake
+# this file already made once.
+#
+# What does separate them is the surrounding syntax. A YAML block scalar is
+# introduced: some `key:` line ends in `|` or `>`, and the value follows
+# indented beneath it. A Go raw string full of identifiers has no such line.
+#
+# So this rule requires the indicator, and therefore applies everywhere --
+# including .go files, where it is what keeps an embedded YAML document in
+# scope while the shape-only rule above steps aside. The lazy repetition lets
+# the hostname sit on any line of the block rather than only the first; one
+# finding per block is enough to fail the build and send someone to read it.
+[[rules]]
+id = "apphub-hostname-block-scalar-indicator"
+description = "hostname inside an introduced YAML block scalar that is not on the allowlist"
+regex = '''(?m)^[ \t]*[A-Za-z0-9_.-]+:[ \t]*[|>][-+0-9]*[ \t]*\r?\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})[ \t]*$'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^apache\.org$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^contributor-covenant\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27. These are shaped like hostnames and are not hosts: an API group
+    # is an identifier in the Kubernetes type system, and a provider that could
+    # not name one could not write an object. Exact-anchored, so no apex is
+    # widened -- in particular svc.cluster.local is allowed as the bare suffix
+    # only, because a full <service>.<namespace>.svc.cluster.local name would
+    # disclose an internal service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "file names, which are shaped like hostnames and are not hosts"
+  regexTarget = "secret"
+  regexes = [
+    '''\.(go|md|yml|yaml|toml|json|sum|mod|sh|txt|html|css|js|ts|py|tf|lock|tmpl|gotmpl|out|log|csv|xml|ini|cfg|conf|env|gitignore|gitleaksignore|dockerignore)$''',
+  ]
+
+[[rules]]
+id = "apphub-hostname-in-url"
+description = "two-label hostname in a URL or email address that is not on the allowlist"
+regex = '''(?:https?://|@)((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})\b'''
+secretGroup = 1
+tags = ["disclosure", "hostname"]
+
+  [[rules.allowlists]]
+  description = "public hosts this repository legitimately references"
+  regexTarget = "secret"
+  regexes = [
+    # Vendor API roots the credential providers must name in code. Each one is a
+    # public, documented endpoint that resolves in public DNS -- verified rather
+    # than taken on trust, since a hostname allowlist is exactly where an
+    # internal host could hide behind a plausible-looking public one. Every
+    # entry is exact-anchored: no apex is widened. For Datadog the list IS the
+    # security control -- credentials/datadog refuses to send an admin key to any
+    # host outside it (USOSS-7).
+    '''^api\.openai\.com$''',
+    '''^api\.github\.com$''',
+    '''^accounts\.google\.com$''',
+    '''^go\.yaml\.in$''',
+    '''^api\.datadoghq\.com$''',
+    '''^api\.datadoghq\.eu$''',
+    '''^api\.us3\.datadoghq\.com$''',
+    '''^api\.us5\.datadoghq\.com$''',
+    '''^api\.ap1\.datadoghq\.com$''',
+    '''^api\.ddog-gov\.com$''',
+    '''^conductorone\.com$''',
+    '''^www\.conductorone\.com$''',
+    '''^c1\.ai$''',
+    '''^www\.c1\.ai$''',
+    '''^github\.com$''',
+    '''^raw\.githubusercontent\.com$''',
+    '''^objects\.githubusercontent\.com$''',
+    '''^users\.noreply\.github\.com$''',
+    '''^docs\.github\.com$''',
+    '''^fonts\.googleapis\.com$''',
+    '''^go\.dev$''',
+    '''^pkg\.go\.dev$''',
+    '''^golang\.org$''',
+    '''^proxy\.golang\.org$''',
+    '''^sum\.golang\.org$''',
+    '''^gopkg\.in$''',
+    '''^www\.apache\.org$''',
+    '''^developercertificate\.org$''',
+    '''^www\.contributor-covenant\.org$''',
+    '''^([a-z0-9-]+\.)*example\.(com|net|org)$''',
+    '''^([a-z0-9-]+\.)*example$''',
+    '''^([a-z0-9-]+\.)*invalid$''',
+    '''^([a-z0-9-]+\.)*test$''',
+    '''^([a-z0-9-]+\.)*localhost$''',
+    # Kubernetes API group names and the cluster-internal DNS suffix, added by
+    # USOSS-27. These are shaped like hostnames and are not hosts: an API group
+    # is an identifier in the Kubernetes type system, and a provider that could
+    # not name one could not write an object. Exact-anchored, so no apex is
+    # widened -- in particular svc.cluster.local is allowed as the bare suffix
+    # only, because a full <service>.<namespace>.svc.cluster.local name would
+    # disclose an internal service and namespace and must stay a finding.
+    '''^kubernetes\.io$''',
+    '''^app\.kubernetes\.io$''',
+    '''^networking\.k8s\.io$''',
+    '''^gateway\.networking\.k8s\.io$''',
+    '''^rbac\.authorization\.k8s\.io$''',
+    '''^postgresql\.cnpg\.io$''',
+    # The Kubernetes module apexes, added by USOSS-15. They appear in Go source
+    # as import-path prefixes in the deploy module's substrate fence -- the rule
+    # naming what modules/deploy may not depend on -- not as hosts anything
+    # connects to. Exact-anchored like every entry here, so internal.k8s.io and
+    # anything else under either apex stays a finding; hack/check-secret-rules.sh
+    # asserts that.
+    '''^k8s\.io$''',
+    '''^sigs\.k8s\.io$''',
+    '''^svc\.cluster\.local$''',
+    # Public hosts the AWS deployment under terraform/ names. Each one is a
+    # documented, publicly resolving endpoint and none of them is ours:
+    # registry.terraform.io is where the provider lock file records what it
+    # pinned, public.ecr.aws is AWS's public gallery, and the two ACME
+    # directories are Let's Encrypt's -- the staging one exists so that bringing
+    # the ingress up does not spend a week of production issuance quota.
+    # Exact-anchored like every entry here, so no apex is widened.
+    '''^registry\.terraform\.io$''',
+    '''^public\.ecr\.aws$''',
+    '''^acme-v02\.api\.letsencrypt\.org$''',
+    '''^acme-staging-v02\.api\.letsencrypt\.org$''',
+    '''^[a-z0-9-]+\.amazonaws\.com$''',
+    '''^[a-z0-9-]+\.[a-z]{2}-[a-z]+-[0-9]\.amazonaws\.com$''',
+    # AWS's own public documentation and the RDS regional trust-bundle host
+    # (terraform/README.md), which operators are told to download from by name.
+    '''^docs\.aws\.amazon\.com$''',
+    '''^truststore\.pki\.rds\.amazonaws\.com$''',
+    # A fictional company domain used as the placeholder tenant/email domain
+    # across this repository's tests, the same role example.com plays above,
+    # for a name that reads better in test fixtures than a reserved TLD does.
+    '''^acme\.dev$''',
+    # Anthropic's public OAuth client host, used as a legitimate client in
+    # internal/oauth/clients_test.go.
+    '''^claude\.ai$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "placeholder tenant URL in the example tfvars, not a real host"
+  condition = "AND"
+  paths = ['''(?:^|/)terraform/environments/example/terraform\.tfvars\.example$''']
+  regexTarget = "secret"
+  regexes = ['''^tenant\.conductor\.one$''']
+
+  [[rules.allowlists]]
+  description = "adversarial redirect-rejection fixture, not a host this repository references"
+  condition = "AND"
+  paths = ['''(?:^|/)internal/oauth/clients_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^localhost\.evil\.com$''']
+
+[[rules]]
+id = "generic-api-key"
+# extend.useDefault = true above means this block is merged into gitleaks'
+# built-in generic-api-key rule (its regex and description are kept; only
+# these allowlists are appended) -- verified by hack/check-secret-rules.sh,
+# whose own generic-api-key fixture is unrelated to either value below.
+
+  [[rules.allowlists]]
+  description = "the fixed MCP auth application ID this test asserts on, not a live credential"
+  condition = "AND"
+  paths = ['''(?:^|/)compute/aws/container_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^018f3f85-9b61-7b70-bc24-38426ea34e21$''']
+
+  [[rules.allowlists]]
+  description = "an obviously-fake Stripe-shaped test key, not a live credential"
+  condition = "AND"
+  paths = ['''(?:^|/)credentials/c1directory/client_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^sk_live_abc123$''']
+
+[[rules]]
+id = "private-key"
+# extend.useDefault = true above means this block is merged into gitleaks'
+# built-in private-key rule; only this allowlist is appended.
+
+  [[rules.allowlists]]
+  description = "a fake, invalid PEM body used only to exercise file-permission and storage-roundtrip behavior, not a real key. The regex reproduces gitleaks' own (non-greedy) match verbatim, which sweeps in the surrounding assertions because the fixture is reused verbatim later in the same test and the non-greedy regex stops at that second occurrence rather than the first"
+  condition = "AND"
+  paths = ['''(?:^|/)internal/ghappkey/local_test\.go$''']
+  regexTarget = "secret"
+  regexes = [
+    '''^-----BEGIN RSA PRIVATE KEY-----\\nfirst\\n-----END RSA PRIVATE KEY-----\\n"\)\); err != nil \{
+		t\.Fatal\(err\)
+	\}
+	info, err := os\.Stat\(path\)
+	if err != nil \{
+		t\.Fatal\(err\)
+	\}
+	if info\.Mode\(\)\.Perm\(\) != 0o600 \{
+		t\.Fatalf\("key file mode = %v, want 0600", info\.Mode\(\)\.Perm\(\)\)
+	\}
+	if exists, err := store\.Exists\(ctx\); err != nil \|\| !exists \{
+		t\.Fatalf\("Exists after Put = \(%v, %v\), want \(true, nil\)", exists, err\)
+	\}
+	got, err := reader\.Get\(ctx\)
+	if err != nil \{
+		t\.Fatal\(err\)
+	\}
+	if credentials\.Reveal\(got\) != "-----BEGIN RSA PRIVATE KEY-----$''',
+  ]
+
+[[allowlists]]
+description = "per-task worktrees are other checkouts of this repository, scanned on their own branches"
+paths = ['''^\.task-worktrees/''']
+
+[[allowlists]]
+description = "local DynamoDB Local state from make infra-up is machine data, not source"
+paths = ['''^\.dynamodb/''']
+
+[[allowlists]]
+description = "loopback serve skeleton from make config-init is machine data, not source"
+paths = ['''^\.local/''']
+
+[[allowlists]]
+description = "gitignored Terraform plugin and module cache; authored .tf sources remain scanned"
+paths = ['''(?:^|/)\.terraform/''']
+
+[[allowlists]]
+description = "the vendored Apache-2.0 text is upstream's, verbatim, and is not ours to edit"
+paths = ['''^LICENSE$''']
+
+[[allowlists]]
+description = "gitignored reproducible frontend bundles; authored frontend sources remain scanned"
+paths = ['''(?:^|/)frontend/dist/''']

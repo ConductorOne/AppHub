@@ -1,0 +1,9 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Replaces the root .dockerignore for Dockerfile.traefik: only the plugin
+# source Traefik loads enters the context.
+**
+!terraform/plugins/cookiestrip/go.mod
+!terraform/plugins/cookiestrip/cookiestrip.go
+!terraform/plugins/cookiestrip/.traefik.yml

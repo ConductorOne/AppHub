@@ -1,0 +1,13 @@
+# Verbatim shape of the workflow that defeated the grep-based checker: both
+# values are quoted, which is what the patterns did not account for.
+name: bypass
+on: [push]
+jobs:
+  bad:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: "write"
+    env:
+      AWS_ACCESS_KEY_ID: "${{ secrets['AWS_KEY'] }}"
+    steps:
+      - run: echo hi

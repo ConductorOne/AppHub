@@ -1,0 +1,55 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Only application/build inputs enter the context. Operator configuration,
+# private state, VCS history, and future unrelated root directories stay out.
+**
+!go.mod
+!go.sum
+!LICENSE
+!NOTICE
+!cmd/
+!cmd/**
+!compute/
+!compute/**
+!credentials/
+!credentials/**
+!docs/guide/
+!docs/guide/**
+!internal/
+!internal/**
+!modules/
+!modules/**
+!postgres/
+!postgres/**
+!store/
+!store/**
+!sdk/
+!sdk/**
+!frontend/
+!frontend/**
+
+**/.git
+**/.git/**
+**/.env
+**/.env.*
+**/.npmrc
+**/.aws
+**/.aws/**
+**/.ssh
+**/.ssh/**
+**/secrets
+**/secrets/**
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/node_modules
+**/node_modules/**
+**/dist
+**/dist/**
+**/.cache
+**/.cache/**
+**/coverage
+**/coverage/**
+**/*.log

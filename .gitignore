@@ -1,0 +1,60 @@
+# Compiled binaries and build output.
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+/examples/notes/notes
+
+# Coverage and profiling output.
+*.out
+coverage.txt
+coverage.html
+*.prof
+
+# Go workspace files: local-only, never committed.
+go.work
+go.work.sum
+
+# Vendored dependencies are not used in this repo; if you vendor locally,
+# keep it out of the tree.
+/vendor/
+
+# Tool binaries installed by `make tools`.
+/.tools/
+
+# Local DynamoDB Local state written by `make infra-up`.
+/.dynamodb/
+
+# Loopback serve skeleton written by `make config-init`.
+/.local/
+
+# Per-task git worktrees created by the development environment. They are other
+# checkouts of this repository, not part of this one.
+/.task-worktrees/
+
+# Terraform working state. The plugin cache and the local state files are
+# machine-local; terraform.tfvars names an account, a domain and an identity
+# provider's clients, none of which belong in a public repository.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+plan.out
+terraform.tfvars
+*.auto.tfvars
+!terraform.tfvars.example
+
+# Editor and OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local environment overrides. Never commit real credentials; see SECURITY.md.
+.env
+.env.*
+!.env.example

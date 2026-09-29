@@ -1,0 +1,74 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kept deliberately modest. This repository is a port, and a linter set tuned to
+# somebody's taste would turn every incoming pull request into a style argument
+# instead of a review of the port. What is enabled beyond the defaults is here
+# because it catches a class of bug that matters for a credential-vending
+# service that is going public.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    # Leaked response bodies are a real resource bug in anything that talks to a
+    # cloud API in a loop.
+    - bodyclose
+    # errors.Is/As instead of == and type assertions.
+    - errorlint
+    # The security linter. This is the one that earns its place here.
+    - gosec
+    - misspell
+    # A //nolint with no explanation is how a suppression outlives its reason.
+    - nolintlint
+    - revive
+    - unconvert
+    - usestdlibvars
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is already on.
+        - G104
+  exclusions:
+    generated: lax
+    rules:
+      # Tests may hardcode weak values and read fixture paths; the linter's
+      # threat model does not apply to them.
+      - path: _test\.go
+        linters:
+          - gosec
+      # Source acquisition is Linux-only, and off Linux this is a true report
+      # about a path that cannot be reached.
+      #
+      # internal/source/process_other.go makes configureProcessGroup panic on a
+      # platform with no process groups, so every analysis run for such a GOOS
+      # prunes the code after the first Git invocation and reports the value
+      # read just above it as unused. It is not a defect and it is not dead code
+      # on the platform that runs it: NewCheckout already refuses to build a
+      # Checkout at all when processGroupsSupported() is false, so neither
+      # Prepare nor Discover is reachable there in the first place.
+      #
+      # Excluded here rather than with a //nolint because the finding exists on
+      # some platforms and not others: a directive would be correct on darwin
+      # and reported as an unused suppression on linux, which is where CI runs.
+      # Named to the one symbol so a genuine SA4006 in these files still fails.
+      - path: internal/source/(checkout|discover)\.go
+        linters:
+          - staticcheck
+        text: "SA4006: this value of repo is never used"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/conductorone/apphub

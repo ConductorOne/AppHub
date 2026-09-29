@@ -1,0 +1,131 @@
+@import url('https://fonts.googleapis.com/css2?family=Anybody:ital,wght@0,100..900;1,100..900&family=Inter:wght@100..900&display=swap');
+
+/* Design tokens. Light values live on :root, dark values under the
+   [data-mui-color-scheme="dark"] attribute. No prefers-color-scheme fallback is
+   needed: the anti-FOUC script in index.html resolves mode="system" to a concrete
+   light/dark attribute before first paint, and MUI keeps it in sync after that. */
+:root {
+  /* ink for labels sitting on a saturated --teal / --err / --ok fill */
+  --on-accent: #FFFFFF;
+  --bg-0: #FFFFFF;
+  --bg-1: #FEFDFC;
+  --bg-2: #F1F0EF;
+  --bg-3: #E8E7E6;
+  --line: #E1E0DF;
+  --line-emph: #C3C1BF;
+  --ink-dim: #ADAAA7;
+  --ink-4: #95928F;
+  --ink-3: #7C7976;
+  --ink-2: #605D5A;
+  --ink-1: #413F3D;
+  --ink: #2A2826;
+  --ink-strong: #000000;
+  --teal: #295F65;
+  --teal-dark: #1B484D;
+  --teal-tint: #EFFAFA;
+  --teal-line: #A9D9DB;
+  --teal-line-soft: #D5F1F0;
+  --ok: #009900;
+  --ok-tint: #DCF4DC;
+  --ok-line: #A6DDA6;
+  --ok-ink: #055205;
+  --err: #E02500;
+  --err-dark: #AD1D00;
+  --err-tint: #FFEAE5;
+  --err-line: #F5BCAD;
+  --err-ink: #6B1200;
+  --warn: #F08000;
+  --warn-tint: #FFECD6;
+  --warn-line: #F2C58A;
+  --warn-ink: #7A4100;
+  --warn-soft: #F9B567;
+  /* magenta accent marking preview/simulated data — outside the C1 palette on purpose */
+  --preview-ink: #7A226A;
+  --preview-tint: #FFE2FA;
+  --preview-line: #FFBFF4;
+}
+
+[data-mui-color-scheme='dark'] {
+  /* dark fills are the bright end of the ramp here, so their ink inverts */
+  --on-accent: #06282C;
+  --bg-0: #1A1918;
+  --bg-1: #211F1E;
+  --bg-2: #272523;
+  --bg-3: #312E2C;
+  --line: #3A3835;
+  --line-emph: #4C4845;
+  --ink-dim: #6E6A66;
+  --ink-4: #8B8783;
+  --ink-3: #A09B97;
+  --ink-2: #BAB5B1;
+  --ink-1: #DAD6D2;
+  --ink: #F2EFEC;
+  --ink-strong: #FFFFFF;
+  --teal: #41B7C2;
+  --teal-dark: #8FDCE3;
+  --teal-tint: #163B3F;
+  --teal-line: #2E6C72;
+  --teal-line-soft: #245459;
+  --ok: #3DBF3D;
+  --ok-tint: #16331A;
+  --ok-line: #2E5F2E;
+  --ok-ink: #93E093;
+  --err: #FF6A4D;
+  --err-dark: #FF9985;
+  --err-tint: #3A1713;
+  --err-line: #71291D;
+  --err-ink: #FFB5A2;
+  --warn: #FFA640;
+  --warn-tint: #3A2A14;
+  --warn-line: #6F522B;
+  --warn-ink: #FFD09A;
+  --warn-soft: #F9B567;
+  --preview-ink: #FFBFF4;
+  --preview-tint: #3A1433;
+  --preview-line: #6B2A5E;
+}
+
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: 'Inter', system-ui, sans-serif; }
+a { color: var(--teal); text-underline-offset: 3px; }
+:focus-visible { outline: 3px solid var(--mui-palette-secondary-main, #FF92EB); outline-offset: 3px; }
+code, pre, .ds-mono { font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+.ds-btn:hover { background: var(--ds-btn-hover-bg) !important; border-color: var(--ds-btn-hover-border) !important; }
+/* Colours for these live here, not inline: an inline style outranks a class rule, so a
+   :hover rule can never override one. */
+.theme-toggle { border: 1px solid var(--line); color: var(--ink-2); }
+.theme-toggle:hover { border-color: var(--line-emph); color: var(--ink); }
+.account-link { color: var(--ink-2); }
+.account-link:hover { color: var(--ink); }
+.account-gear { color: var(--ink-4); }
+.account-link:hover .account-gear { color: var(--ink-2); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 3px solid var(--bg-0); }
+.skip-link { position: fixed; left: 16px; top: -80px; z-index: 2000; background: var(--bg-1); color: var(--ink); padding: 12px; }
+.skip-link:focus { top: 12px; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.break-text { overflow-wrap: anywhere; word-break: break-word; }
+[data-mui-color-scheme="dark"] .brand-logo-light { display: none !important; }
+[data-mui-color-scheme="dark"] .brand-logo-dark { display: block !important; }
+@media (max-width: 600px) { .form-grid { grid-template-columns: 1fr; } }
+.row-hover:hover { background: var(--bg-1); }
+.docs-nav-link:hover { background: var(--bg-3); }
+.docs-card:hover { border-color: var(--line-emph); }
+.docs-layout { display: grid; grid-template-columns: minmax(180px, 210px) minmax(0, 1fr); align-items: start; min-height: 100%; }
+.docs-sidebar {
+  position: sticky; top: 0; align-self: start; height: 100%; overflow-y: auto;
+  border-right: 1px solid var(--line); background: var(--bg-1); padding: 20px 14px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+@media (max-width: 720px) {
+  .docs-layout { grid-template-columns: 1fr; }
+  .docs-sidebar { position: static; height: auto; max-height: 280px; border-right: none; border-bottom: 1px solid var(--line); }
+}
+.app-overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); gap: 24px; align-items: start; }
+@media (max-width: 1000px) { .app-overview-grid { grid-template-columns: minmax(0, 1fr); } }
+@keyframes ah-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+.ah-pulse { animation: ah-pulse 1.4s ease-in-out infinite; }
+@keyframes ah-spin { to { transform: rotate(360deg); } }
+.ah-spin { animation: ah-spin 900ms linear infinite; }
+@media (prefers-reduced-motion: reduce) { .ah-pulse, .ah-spin { animation: none; } }

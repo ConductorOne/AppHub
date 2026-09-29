@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 780" width="1400" height="780" role="img" aria-labelledby="title desc">
+  <title id="title">AppHub architecture</title>
+  <desc id="desc">People reach the AppHub API through the control-plane load balancer and reach deployed applications through the apps load balancer, Traefik and oauth2-proxy sign-in. The API queues deployments in DynamoDB; the worker claims them, fetches source from GitHub, builds images with Kaniko build tasks over EFS, pushes them to ECR, and creates each application's service and attached resources.</desc>
+  <style>
+    svg {
+      --bg: #ffffff; --ink: #1f2328; --ink-2: #59636e; --box: #f6f8fa; --line: #d1d9e0;
+      --group: #afb8c1; --ext: #ffffff; --ext-line: #8c959f; --req: #0969da; --dep: #bc4c00;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --ink: #e6edf3; --ink-2: #9198a1; --box: #161b22; --line: #3d444d;
+        --group: #656c76; --ext: #0d1117; --ext-line: #9198a1; --req: #4493f8; --dep: #f0883e;
+      }
+    }
+    .bg { fill: var(--bg); }
+    .box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+    .ext { fill: var(--ext); stroke: var(--ext-line); stroke-width: 1.5; }
+    .grp { fill: none; stroke: var(--group); stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .title { fill: var(--ink); font-size: 22px; font-weight: 700; }
+    .glabel { fill: var(--ink-2); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+    .t { fill: var(--ink); font-size: 14px; font-weight: 600; text-anchor: middle; }
+    .s { fill: var(--ink-2); font-size: 12px; text-anchor: middle; }
+    .note { fill: var(--ink-2); font-size: 12px; }
+    .lab { font-size: 11px; font-weight: 600; }
+    .req { stroke: var(--req); fill: none; stroke-width: 2; }
+    .dep { stroke: var(--dep); fill: none; stroke-width: 2; }
+    .opt { stroke-dasharray: 5 4; }
+    .req-l { fill: var(--req); }
+    .dep-l { fill: var(--dep); }
+    .head-req { fill: var(--req); }
+    .head-dep { fill: var(--dep); }
+  </style>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path class="head-req" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+    <marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path class="head-dep" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1400" height="780"/>
+  <text class="title" x="24" y="32">AppHub architecture</text>
+
+  <!-- Groups -->
+  <rect class="grp" x="300" y="66" width="420" height="654" rx="10"/>
+  <text class="glabel" x="316" y="88">AppHub platform</text>
+  <rect class="grp" x="750" y="66" width="430" height="654" rx="10"/>
+  <text class="glabel" x="766" y="88">Deployed applications</text>
+
+  <!-- External actors -->
+  <rect class="ext" x="24" y="100" width="230" height="70" rx="8"/>
+  <text class="t" x="139" y="130">People</text>
+  <text class="s" x="139" y="150">Browser, CLI, MCP clients</text>
+
+  <rect class="ext" x="24" y="370" width="230" height="70" rx="8"/>
+  <text class="t" x="139" y="400">GitHub</text>
+  <text class="s" x="139" y="420">Source via the AppHub GitHub App</text>
+
+  <rect class="ext" x="24" y="560" width="230" height="70" rx="8"/>
+  <text class="t" x="139" y="590">ConductorOne (optional)</text>
+  <text class="s" x="139" y="610">App catalog, ShortLinks, groups</text>
+
+  <rect class="ext" x="1210" y="190" width="170" height="70" rx="8"/>
+  <text class="t" x="1295" y="220">Identity provider</text>
+  <text class="s" x="1295" y="240">OIDC sign-in</text>
+
+  <!-- Platform -->
+  <rect class="box" x="330" y="100" width="360" height="50" rx="8"/>
+  <text class="t" x="510" y="130">Control-plane load balancer</text>
+
+  <rect class="box" x="330" y="180" width="360" height="70" rx="8"/>
+  <text class="t" x="510" y="210">API service</text>
+  <text class="s" x="510" y="230">Web UI · REST API · MCP at /mcp</text>
+
+  <rect class="box" x="330" y="280" width="360" height="60" rx="8"/>
+  <text class="t" x="510" y="305">DynamoDB</text>
+  <text class="s" x="510" y="324">Platform state, deployment queue, audit log</text>
+
+  <rect class="box" x="330" y="370" width="360" height="70" rx="8"/>
+  <text class="t" x="510" y="400">Worker</text>
+  <text class="s" x="510" y="420">Claims queued deployments, provisions apps</text>
+
+  <rect class="box" x="330" y="480" width="220" height="70" rx="8"/>
+  <text class="t" x="440" y="510">Build task</text>
+  <text class="s" x="440" y="530">Kaniko on Fargate</text>
+
+  <rect class="box" x="570" y="480" width="120" height="70" rx="8"/>
+  <text class="t" x="630" y="510">EFS</text>
+  <text class="s" x="630" y="530">Build slots</text>
+
+  <rect class="box" x="330" y="600" width="360" height="60" rx="8"/>
+  <text class="t" x="510" y="625">ECR</text>
+  <text class="s" x="510" y="644">One image repository per app</text>
+
+  <!-- Applications -->
+  <rect class="box" x="780" y="100" width="370" height="55" rx="8"/>
+  <text class="t" x="965" y="124">Apps load balancer</text>
+  <text class="s" x="965" y="143">*.apps.&lt;domain&gt;</text>
+
+  <rect class="box" x="780" y="190" width="175" height="70" rx="8"/>
+  <text class="t" x="867" y="220">Traefik</text>
+  <text class="s" x="867" y="240">Routes by hostname</text>
+
+  <rect class="box" x="975" y="190" width="175" height="70" rx="8"/>
+  <text class="t" x="1062" y="220">oauth2-proxy</text>
+  <text class="s" x="1062" y="240">Checks sign-in</text>
+
+  <rect class="box" x="780" y="300" width="370" height="70" rx="8"/>
+  <text class="t" x="965" y="330">Application</text>
+  <text class="s" x="965" y="350">ECS Fargate service or scheduled job</text>
+
+  <rect class="grp" x="768" y="392" width="394" height="240" rx="8"/>
+  <text class="glabel" x="780" y="412">Attached per application</text>
+
+  <rect class="box" x="780" y="424" width="178" height="56" rx="8"/>
+  <text class="t" x="869" y="448">Aurora PostgreSQL</text>
+  <text class="s" x="869" y="466">or a DynamoDB table</text>
+  <rect class="box" x="972" y="424" width="178" height="56" rx="8"/>
+  <text class="t" x="1061" y="448">S3 bucket</text>
+  <text class="s" x="1061" y="466">Object storage</text>
+
+  <rect class="box" x="780" y="492" width="178" height="56" rx="8"/>
+  <text class="t" x="869" y="516">Secrets</text>
+  <text class="s" x="869" y="534">SSM Parameter Store</text>
+  <rect class="box" x="972" y="492" width="178" height="56" rx="8"/>
+  <text class="t" x="1061" y="516">IAM roles</text>
+  <text class="s" x="1061" y="534">Workload and execution</text>
+
+  <rect class="box" x="780" y="560" width="178" height="56" rx="8"/>
+  <text class="t" x="869" y="584">CloudWatch Logs</text>
+  <text class="s" x="869" y="602">Per-app log group</text>
+  <rect class="box" x="972" y="560" width="178" height="56" rx="8"/>
+  <text class="t" x="1061" y="584">Security groups</text>
+  <text class="s" x="1061" y="602">Scoped network access</text>
+
+  <text class="note" x="780" y="664">The worker creates these at deploy time;</text>
+  <text class="note" x="780" y="682">Terraform only sets up the platform.</text>
+
+  <!-- Request path -->
+  <path class="req" d="M254 125 H330" marker-end="url(#ar)"/>
+  <text class="lab req-l" x="292" y="117" text-anchor="middle">portal</text>
+  <path class="req" d="M510 150 V180" marker-end="url(#ar)"/>
+  <path class="req" d="M139 100 V50 H965 V100" marker-end="url(#ar)"/>
+  <text class="lab req-l" x="552" y="44" text-anchor="middle">app traffic</text>
+  <path class="req" d="M867 155 V190" marker-end="url(#ar)"/>
+  <path class="req" d="M955 225 H975" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <path class="req" d="M1150 225 H1210" marker-end="url(#ar)"/>
+  <text class="lab req-l" x="1180" y="217" text-anchor="middle">sign-in</text>
+  <path class="req" d="M867 260 V300" marker-end="url(#ar)"/>
+
+  <!-- Deploy path -->
+  <path class="dep" d="M510 250 V280" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="518" y="269">queues</text>
+  <path class="dep" d="M510 370 V340" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="518" y="359">claims</text>
+  <path class="dep" d="M254 405 H330" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="292" y="397" text-anchor="middle">source</text>
+  <path class="dep" d="M440 440 V480" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="448" y="464">runs</text>
+  <path class="dep" d="M550 515 H570" marker-start="url(#ad)" marker-end="url(#ad)"/>
+  <path class="dep" d="M690 425 H705 V630 H690" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="699" y="585" text-anchor="end">push image</text>
+  <path class="dep" d="M690 395 H735 V335 H780" marker-end="url(#ad)"/>
+  <path class="dep" d="M735 395 V510 H768" marker-end="url(#ad)"/>
+  <text class="lab dep-l" x="0" y="0" text-anchor="middle" transform="translate(748 455) rotate(-90)">provisions</text>
+  <path class="dep opt" d="M330 425 H282 V595 H254" marker-end="url(#ad)"/>
+
+  <!-- Legend -->
+  <path class="req" d="M24 752 H64"/>
+  <text class="note" x="72" y="756">Request path</text>
+  <path class="dep" d="M184 752 H224"/>
+  <text class="note" x="232" y="756">Deploy path</text>
+  <path class="dep opt" d="M340 752 H380"/>
+  <text class="note" x="388" y="756">Optional integration</text>
+</svg>

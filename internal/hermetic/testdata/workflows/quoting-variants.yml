@@ -1,0 +1,19 @@
+# Every spelling of the same two values that a pattern would have to enumerate
+# separately and a parser sees as one.
+name: variants
+on: [push]
+jobs:
+  single-quoted:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: 'write'
+  explicitly-tagged:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: !!str write
+  flow-mapping:
+    runs-on: ubuntu-latest
+    permissions: {contents: read, id-token: write}
+  write-all:
+    runs-on: ubuntu-latest
+    permissions: write-all

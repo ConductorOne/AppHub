@@ -1,0 +1,28 @@
+# Copyright 2026 ConductorOne, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Local-only development infrastructure. `make infra-up` owns its lifecycle.
+#
+# Host ports are offset from DynamoDB Local's defaults (8000 / 8001) so this
+# stack can run beside another instance on the usual ports.
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.1
+    working_dir: /home/dynamodblocal
+    command: -jar DynamoDBLocal.jar -sharedDb -dbPath ./data
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - ./.dynamodb:/home/dynamodblocal/data
+
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:5.3.4
+    ports:
+      - "127.0.0.1:18001:8001"
+    environment:
+      DYNAMO_ENDPOINT: http://dynamodb:8000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on:
+      - dynamodb

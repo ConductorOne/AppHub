@@ -1,0 +1,21 @@
+# Findings in commits already on main, acknowledged here because history is not
+# rewritten. Each entry is one finding's fingerprint (commit:file:rule:line), so
+# nothing new is covered by it. All are false positives, and neither value is in
+# the current tree:
+#
+# - 84955de: frontend/src/design/simulated.ts used AWS's documented example
+#   account (the one .gitleaks.toml allows for store/cmd/devseed) in two fake
+#   ECR log lines. Removed in 25e8ba6.
+# - 46859e7: frontend/src/pages/Workspace.tsx had the member chain
+#   `groups`, `data`, `map` joined by dots, which the hostname rule reads as a
+#   host under the .map TLD.
+# - The commit that added this file spelled that member chain out in the
+#   comment above, and was pushed before it was caught.
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-aws-ecr-registry-host:87
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-aws-ecr-registry-host:95
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-twelve-digit-identifier:87
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-twelve-digit-identifier:95
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-hostname-multilabel:87
+84955de6ad2b4dc9639160ed4b123e2167b69a12:frontend/src/design/simulated.ts:apphub-hostname-multilabel:95
+46859e72efddd86feec01ea2b8069b6478fc6268:frontend/src/pages/Workspace.tsx:apphub-hostname-multilabel:98
+b9e632c6ed38ece2b632055227d712f62e6ba9e9:.gitleaksignore:apphub-hostname-multilabel:10
