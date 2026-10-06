@@ -8,22 +8,22 @@ toolchain go1.27.1
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.7
-	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.88.1
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.1
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.336.1
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.8
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.89.0
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.70.0
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.1
 	github.com/aws/aws-sdk-go-v2/service/ecr v1.66.1
-	github.com/aws/aws-sdk-go-v2/service/ecs v1.99.1
+	github.com/aws/aws-sdk-go-v2/service/ecs v1.100.0
 	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.63.1
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.61.1
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.110.0
-	github.com/aws/aws-sdk-go-v2/service/rds v1.129.1
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
+	github.com/aws/aws-sdk-go-v2/service/rds v1.130.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/aws/aws-sdk-go-v2/service/s3tables v1.23.1
-	github.com/aws/aws-sdk-go-v2/service/s3vectors v1.15.1
+	github.com/aws/aws-sdk-go-v2/service/s3vectors v1.16.0
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.1
-	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.1
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1
 	github.com/aws/smithy-go v1.28.2
 	github.com/coreos/go-oidc/v3 v3.21.0
