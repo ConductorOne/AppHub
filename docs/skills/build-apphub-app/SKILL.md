@@ -149,7 +149,7 @@ Adapt to the language; the shape matters, not the toolchain.
 
 ```dockerfile
 # syntax=docker/dockerfile:1
-FROM public.ecr.aws/docker/library/golang:1.25 AS build
+FROM public.ecr.aws/docker/library/golang:1.27.3 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
