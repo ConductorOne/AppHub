@@ -668,13 +668,13 @@ func readSecretBytes(file, env string, limit int64) ([]byte, error) {
 }
 
 func readFile(filename string, limit int64) ([]byte, error) {
-	info, err := os.Stat(filename)
+	info, err := os.Stat(filename) //nolint:gosec // G703: same operator-selected path bounded below
 	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, errors.New("invalid file")
 	}
 	// #nosec G304 -- Only operator-selected config and mounted-secret paths reach
 	// this loader, never HTTP input; regular-file and byte bounds are enforced.
-	f, err := os.Open(filename)
+	f, err := os.Open(filename) //nolint:gosec // G703: same operator-selected path; see #nosec G304 above
 	if err != nil {
 		return nil, errors.New("unreadable file")
 	}

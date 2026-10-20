@@ -15,7 +15,7 @@ SHELL := /usr/bin/env bash
 
 # Tool versions. Pinned so a green build stays green for a reason, and so
 # upgrading a linter is a reviewable one-line diff rather than a surprise.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOVULNCHECK_VERSION   ?= v1.7.0
 GO_LICENSES_VERSION   ?= v2.0.1
 GITLEAKS_VERSION      ?= v8.30.1
