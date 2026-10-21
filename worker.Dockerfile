@@ -1,7 +1,7 @@
 # Copyright 2026 ConductorOne, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS go-base
+FROM golang:1.27.3-bookworm@sha256:5c3e9b43cfd3bb95c7937462e29d87ada57b481a96fa23ad0eb61778d7a00110 AS go-base
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 
 # Independent modules: tool dependencies never modify AppHub's go.mod/go.sum.

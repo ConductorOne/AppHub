@@ -15,7 +15,7 @@ SHELL := /usr/bin/env bash
 
 # Tool versions. Pinned so a green build stays green for a reason, and so
 # upgrading a linter is a reviewable one-line diff rather than a surprise.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOVULNCHECK_VERSION   ?= v1.7.0
 GO_LICENSES_VERSION   ?= v2.0.1
 GITLEAKS_VERSION      ?= v8.30.1
@@ -94,9 +94,9 @@ BUILDER_IMAGE ?= apphub/builder
 # It also keeps `.tools/` binaries built by the same toolchain as the module,
 # which is what stops go-licenses reporting every standard library package as
 # missing module info.
-GO_TOOLCHAIN := $(shell awk '/^toolchain /{print $$2}' go.mod)
+GO_TOOLCHAIN := $(shell awk '/^toolchain /{t=$$2} /^go /{g="go"$$2} END{print (t != "" ? t : g)}' go.mod)
 ifeq ($(GO_TOOLCHAIN),)
-$(error no toolchain directive in go.mod: refusing to run with an unpinned toolchain)
+$(error no toolchain or go directive in go.mod: refusing to run with an unpinned toolchain)
 endif
 export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 

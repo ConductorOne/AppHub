@@ -580,12 +580,12 @@ func (c *Checkout) run(ctx context.Context, auth *askpass, args ...string) (stri
 			return out.String(), nil
 		case <-ctx.Done():
 			killProcessGroup(cmd)
-			<-done
+			<-done //nolint:errcheck // reaping the killed process; the cancellation is what gets reported
 			return "", ErrCanceled
 		case <-ticker.C:
 			if err := directoryBound(c.root, c.limit); err != nil {
 				killProcessGroup(cmd)
-				<-done
+				<-done //nolint:errcheck // reaping the killed process; the bound error is what gets reported
 				return "", err
 			}
 		}

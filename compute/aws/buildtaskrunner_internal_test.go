@@ -683,7 +683,7 @@ func TestBuildTaskRunnerWaitsForStoppedBeforeReusingSlot(t *testing.T) {
 	cancel()
 	waitForStopRequest(t, h.tasks)
 	select {
-	case <-first:
+	case <-first: //nolint:errcheck // the value is irrelevant: any receive means the build returned early
 		t.Fatal("the build returned before ECS reported STOPPED")
 	default:
 	}
