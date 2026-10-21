@@ -23,7 +23,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.1
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.1
-	github.com/aws/smithy-go v1.28.2
+	github.com/aws/smithy-go v1.28.5
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/gofrs/flock v0.13.1
 	github.com/jackc/pgx/v5 v5.11.0
